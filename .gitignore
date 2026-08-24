@@ -167,3 +167,6 @@ dist
 .env
 !.env.example
 .wrangler/
+
+# koreader plugin
+koreader/ereader-sync.koplugin/config.lua
