@@ -272,31 +272,120 @@ async function saveEpubToR2(
 		document.file_id,
 	);
 
-	const downloadResponse = await downloadTelegramFile(
-		env.TELEGRAM_BOT_TOKEN,
-		filePath,
-	);
+	const downloadResponse =
+		await downloadTelegramFile(
+			env.TELEGRAM_BOT_TOKEN,
+			filePath,
+		);
 
 	const originalFileName =
-		document.file_name ?? `${document.file_unique_id}.epub`;
+		document.file_name ??
+		`${document.file_unique_id}.epub`;
 
-	const safeFileName = sanitizeFileName(originalFileName);
+	const safeFileName =
+		sanitizeFileName(
+			originalFileName,
+		);
 
-	const r2Key = `books/${safeFileName}`;
+	const originalBytes =
+		new Uint8Array(
+			await downloadResponse.arrayBuffer(),
+		);
+
+	const {
+		repairEpubMetadata,
+	} = await import(
+		"./epub-metadata"
+	);
+
+	const repaired =
+		await repairEpubMetadata(
+			originalBytes,
+			originalFileName,
+		);
+
+	const r2Key =
+		`books/${safeFileName}`;
+
+	const customMetadata: Record<string, string> = {
+		telegramFileId:
+			document.file_id,
+
+		telegramFileUniqueId:
+			document.file_unique_id,
+
+		originalFileName,
+
+		metadataRepaired:
+			repaired.repairedFields.length > 0
+				? "true"
+				: "false",
+
+		repairedFields:
+			repaired.repairedFields.join(","),
+
+		metadataWarnings:
+			repaired.warnings.join(" | "),
+	};
+
+	if (repaired.metadata.title) {
+		customMetadata.title =
+			repaired.metadata.title;
+	}
+
+	if (repaired.metadata.author) {
+		customMetadata.author =
+			repaired.metadata.author;
+	}
+
+	if (repaired.metadata.description) {
+		customMetadata.description =
+			repaired.metadata.description.slice(
+				0,
+				1024,
+			);
+	}
+
+	if (repaired.metadata.language) {
+		customMetadata.language =
+			repaired.metadata.language;
+	}
+
+	if (repaired.metadata.isbn) {
+		customMetadata.isbn =
+			repaired.metadata.isbn;
+	}
+
+	if (repaired.metadata.publisher) {
+		customMetadata.publisher =
+			repaired.metadata.publisher;
+	}
+
+	if (repaired.metadata.published) {
+		customMetadata.published =
+			repaired.metadata.published;
+	}
+
+	if (repaired.metadata.series) {
+		customMetadata.series =
+			repaired.metadata.series;
+	}
+
+	if (repaired.metadata.seriesIndex) {
+		customMetadata.seriesIndex =
+			repaired.metadata.seriesIndex;
+	}
 
 	await env.EREADER_BUCKET.put(
 		r2Key,
-		downloadResponse.body,
+		repaired.bytes,
 		{
 			httpMetadata: {
 				contentType:
-					document.mime_type ?? "application/epub+zip",
+					"application/epub+zip",
 			},
-			customMetadata: {
-				telegramFileId: document.file_id,
-				telegramFileUniqueId: document.file_unique_id,
-				originalFileName,
-			},
+
+			customMetadata,
 		},
 	);
 
