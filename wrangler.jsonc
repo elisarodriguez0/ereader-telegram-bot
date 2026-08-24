@@ -17,7 +17,10 @@
 			"binding": "EREADER_BUCKET",
 			"remote": true
 		}
-	]
+	],
+	"images": {
+		"binding": "IMAGES"
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
