@@ -1,3 +1,7 @@
+import type {
+	Env,
+} from "./env";
+
 import {
 	repairEpub,
 } from "./metadata/epub";
@@ -5,317 +9,310 @@ import {
 import type {
 	BookMetadata,
 	MetadataSource,
+	ResolvedMetadata,
 } from "./metadata/types";
 
-export interface TelegramEpubDocument {
-	file_id: string;
-
-	file_unique_id: string;
-
-	file_name?: string;
-
-	mime_type?: string;
-
-	file_size?: number;
+export interface StoredEpubResult {
+	key: string;
+	fileName: string;
+	size: number;
+	metadata: BookMetadata;
+	resolved: ResolvedMetadata;
+	message: string;
 }
 
-export interface EpubUploadResult {
-	r2Key: string;
-
-	metadata:
-		BookMetadata;
-
-	sources:
-		Partial<
-			Record<
-				keyof BookMetadata,
-				MetadataSource
-			>
-		>;
-
-	repairedFields:
-		string[];
-
-	warnings:
-		string[];
-
-	matches:
-		Array<{
-			source:
-				string;
-
-			score:
-				number;
-
-			url?: string;
-		}>;
-}
-
-async function getTelegramFilePath(
-	token: string,
-	fileId: string,
-): Promise<string> {
-	const response =
-		await fetch(
-			`https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`,
-		);
-
-	if (!response.ok) {
-		throw new Error(
-			`Telegram getFile failed: HTTP ${response.status}`,
-		);
-	}
-
-	const data =
-		(await response.json()) as {
-			ok: boolean;
-
-			result?: {
-				file_path?: string;
-			};
-
-			description?: string;
-		};
-
-	if (
-		!data.ok ||
-		!data.result?.file_path
-	) {
-		throw new Error(
-			data.description ??
-				"Telegram did not return file_path",
-		);
-	}
-
-	return data.result.file_path;
-}
-
-function sanitizeFileName(
+export function safeFileName(
 	fileName: string,
 ): string {
-	return fileName
-		.replace(
-			/[<>:"/\\|?*\x00-\x1F]/g,
-			"_",
-		)
+	const clean = fileName
+		.replace(/[\\/\0]/g, "_")
+		.replace(/[\u0001-\u001f\u007f]/g, "")
+		.replace(/\s+/g, " ")
 		.trim();
+
+	const base = clean || "book.epub";
+
+	return base.toLowerCase().endsWith(".epub")
+		? base
+		: `${base}.epub`;
 }
 
-export async function processEpubUpload(
-	options: {
-		telegramToken: string;
+function formatSourceList(
+	resolved: ResolvedMetadata,
+): string | undefined {
+	const bestBySource = new Map<
+		MetadataSource,
+		number
+	>();
 
-		bucket: R2Bucket;
+	for (const match of resolved.matches) {
+		const previous =
+			bestBySource.get(
+				match.source,
+			) ?? 0;
 
-		document:
-			TelegramEpubDocument;
+		if (match.score > previous) {
+			bestBySource.set(
+				match.source,
+				match.score,
+			);
+		}
+	}
 
-		googleBooksApiKey?: string;
+	const order: MetadataSource[] = [
+		"lectulandia",
+		"google-books",
+		"open-library",
+	];
 
-		lectulandiaBaseUrl?: string;
-	},
-): Promise<EpubUploadResult> {
-	const {
-		telegramToken,
-		bucket,
-		document,
-		googleBooksApiKey,
-		lectulandiaBaseUrl,
-	} = options;
-
-	const filePath =
-		await getTelegramFilePath(
-			telegramToken,
-			document.file_id,
+	const values = order
+		.filter((source) =>
+			bestBySource.has(source),
+		)
+		.map(
+			(source) =>
+				`${source} (${bestBySource.get(source)}%)`,
 		);
 
-	const download =
-		await fetch(
-			`https://api.telegram.org/file/bot${telegramToken}/${filePath}`,
-		);
+	return values.length
+		? values.join(", ")
+		: undefined;
+}
 
-	if (!download.ok) {
-		throw new Error(
-			`Telegram download failed: HTTP ${download.status}`,
+function formatDateAndPages(
+	metadata: BookMetadata,
+): string | undefined {
+	const parts: string[] = [];
+
+	if (metadata.published) {
+		parts.push(metadata.published);
+	}
+
+	if (metadata.pageCount) {
+		parts.push(
+			`${metadata.pageCount} páginas`,
 		);
 	}
 
-	const originalFileName =
-		document.file_name ??
-		`${document.file_unique_id}.epub`;
+	return parts.length
+		? parts.join(" · ")
+		: undefined;
+}
 
-	const originalBytes =
-		new Uint8Array(
-			await download.arrayBuffer(),
+function formatTelegramMessage(
+	key: string,
+	metadata: BookMetadata,
+	resolved: ResolvedMetadata,
+): string {
+	const lines: string[] = [
+		"📚 EPUB preparado",
+		"",
+		metadata.title ?? "Título desconocido",
+		metadata.author ?? "Autor desconocido",
+	];
+
+	if (metadata.series) {
+		lines.push(
+			"",
+			`📖 Serie: ${metadata.series}${
+				metadata.seriesIndex
+					? ` #${metadata.seriesIndex}`
+					: ""
+			}`,
+		);
+	}
+
+	const dateAndPages =
+		formatDateAndPages(metadata);
+
+	if (dateAndPages) {
+		lines.push(
+			`📅 ${dateAndPages}`,
+		);
+	}
+
+	if (metadata.subjects?.length) {
+		lines.push(
+			`🏷️ ${metadata.subjects.join(" · ")}`,
+		);
+	}
+
+	if (metadata.isbn) {
+		lines.push(
+			`ISBN: ${metadata.isbn}`,
+		);
+	}
+
+	if (metadata.publisher) {
+		lines.push(
+			`Editorial: ${metadata.publisher}`,
+		);
+	}
+
+	if (resolved.repairedFields.length) {
+		lines.push(
+			"",
+			`🔧 Actualizado: ${resolved.repairedFields.join(", ")}`,
+		);
+	}
+
+	const sources =
+		formatSourceList(resolved);
+
+	if (sources) {
+		lines.push(
+			`🔎 Fuentes: ${sources}`,
+		);
+	}
+
+	const warnings = [
+		...resolved.warnings,
+	];
+
+	const hasGoogle =
+		resolved.matches.some(
+			(match) =>
+				match.source ===
+				"google-books",
 		);
 
-	const repaired =
-		await repairEpub(
-			originalBytes,
+	if (!hasGoogle) {
+		warnings.push(
+			"Google Books returned no confident match",
+		);
+	}
+
+	if (warnings.length) {
+		lines.push("");
+
+		for (const warning of [
+			...new Set(warnings),
+		]) {
+			lines.push(`⚠️ ${warning}`);
+		}
+	}
+
+	lines.push(
+		"",
+		`☁️ ${key}`,
+		"",
+		"✅ Listo para sincronizar.",
+	);
+
+	return lines.join("\n");
+}
+
+function metadataSourcesForR2(
+	resolved: ResolvedMetadata,
+): string {
+	return Object.entries(
+		resolved.sources,
+	)
+		.map(
+			([field, source]) =>
+				`${field}:${source}`,
+		)
+		.join(",");
+}
+
+export async function prepareAndStoreEpub(
+	env: Env,
+	originalBytes: Uint8Array,
+	originalFileName: string,
+): Promise<StoredEpubResult> {
+	const fileName =
+		safeFileName(
 			originalFileName,
-			{
-				googleBooksApiKey,
-
-				lectulandiaBaseUrl:
-					lectulandiaBaseUrl ??
-					"https://ww3.lectulandia.com",
-			},
 		);
 
-	const safeFileName =
-		sanitizeFileName(
-			originalFileName,
-		);
-
-	const r2Key =
-		`books/${safeFileName}`;
+	const repaired = await repairEpub(
+		originalBytes,
+		fileName,
+		{
+			googleBooksApiKey:
+				env.GOOGLE_BOOKS_API_KEY,
+			lectulandiaBaseUrl:
+				env.LECTULANDIA_BASE_URL,
+		},
+	);
 
 	const metadata =
 		repaired.resolved.metadata;
 
-	const customMetadata:
-		Record<string, string> =
-			{
-				telegramFileUniqueId:
-					document.file_unique_id,
+	const key = `books/${fileName}`;
 
-				originalFileName,
+	const customMetadata: Record<
+		string,
+		string
+	> = {
+		metadataRepaired:
+			repaired.resolved.repairedFields.length
+				? "true"
+				: "false",
+		metadataSources:
+			metadataSourcesForR2(
+				repaired.resolved,
+			),
+	};
 
-				repairedFields:
-					repaired.resolved
-						.repairedFields
-						.join(","),
+	const compactFields: Array<
+		[keyof BookMetadata, string]
+	> = [
+		["title", "title"],
+		["author", "author"],
+		["language", "language"],
+		["isbn", "isbn"],
+		["publisher", "publisher"],
+		["published", "published"],
+		["series", "series"],
+		["seriesIndex", "seriesIndex"],
+	];
 
-				warnings:
-					repaired.resolved
-						.warnings
-						.join(" | ")
-						.slice(0, 1500),
-			};
-
-	function set(
-		key: string,
-		value:
-			| string
-			| number
-			| undefined,
-	): void {
+	for (const [field, name] of compactFields) {
+		const value = metadata[field];
 		if (
-			value !== undefined &&
-			value !== ""
+			typeof value === "string" &&
+			value
 		) {
-			customMetadata[key] =
-				String(value);
+			customMetadata[name] =
+				value.slice(0, 500);
 		}
 	}
 
-	set(
-		"title",
-		metadata.title,
-	);
+	if (metadata.pageCount) {
+		customMetadata.pageCount =
+			String(metadata.pageCount);
+	}
 
-	set(
-		"author",
-		metadata.author,
-	);
+	if (metadata.description) {
+		customMetadata.descriptionPreview =
+			metadata.description.slice(0, 300);
+	}
 
-	set(
-		"language",
-		metadata.language,
-	);
-
-	set(
-		"isbn",
-		metadata.isbn,
-	);
-
-	set(
-		"publisher",
-		metadata.publisher,
-	);
-
-	set(
-		"published",
-		metadata.published,
-	);
-
-	set(
-		"pageCount",
-		metadata.pageCount,
-	);
-
-	set(
-		"series",
-		metadata.series,
-	);
-
-	set(
-		"seriesIndex",
-		metadata.seriesIndex,
-	);
-
-	set(
-		"subjects",
-		metadata.subjects
-			?.join(", ")
-			.slice(0, 500),
-	);
-
-	set(
-		"metadataSources",
-		Object.entries(
-			repaired.resolved
-				.sources,
-		)
-			.map(
-				([field, source]) =>
-					`${field}:${source}`,
-			)
-			.join(","),
-	);
-
-	await bucket.put(
-		r2Key,
+	await env.EREADER_BUCKET.put(
+		key,
 		repaired.bytes,
 		{
 			httpMetadata: {
 				contentType:
 					"application/epub+zip",
+				contentDisposition:
+					`attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
 			},
-
 			customMetadata,
 		},
 	);
 
 	return {
-		r2Key,
-
+		key,
+		fileName,
+		size: repaired.bytes.byteLength,
 		metadata,
-
-		sources:
-			repaired.resolved.sources,
-
-		repairedFields:
-			repaired.resolved
-				.repairedFields,
-
-		warnings:
-			repaired.resolved
-				.warnings,
-
-		matches:
-			repaired.resolved.matches
-				.map(
-					(match) => ({
-						source:
-							match.source,
-
-						score:
-							match.score,
-
-						url:
-							match.url,
-					}),
-				),
+		resolved: repaired.resolved,
+		message: formatTelegramMessage(
+			key,
+			metadata,
+			repaired.resolved,
+		),
 	};
 }

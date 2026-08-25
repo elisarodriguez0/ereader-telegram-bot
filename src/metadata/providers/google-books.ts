@@ -1,12 +1,18 @@
 import {
+	authorSimilarity,
+	clamp,
 	cleanText,
+	languageMatches,
 	normalizeIsbn,
-	scoreBookMatch,
+	normalizePublicationDate,
+	sameSeriesIndex,
+	scoreTitleMatch,
 } from "../normalize";
 
 import type {
-	FilenameMetadata,
+	BookMetadata,
 	MetadataCandidate,
+	SearchHypothesis,
 } from "../types";
 
 interface GoogleBooksResponse {
@@ -18,13 +24,9 @@ interface GoogleVolume {
 
 	volumeInfo?: {
 		title?: string;
-		subtitle?: string;
-
 		authors?: string[];
-
 		publisher?: string;
 		publishedDate?: string;
-
 		description?: string;
 
 		industryIdentifiers?: Array<{
@@ -33,14 +35,11 @@ interface GoogleVolume {
 		}>;
 
 		pageCount?: number;
-
 		categories?: string[];
-
 		language?: string;
 
 		seriesInfo?: {
 			bookDisplayNumber?: string;
-
 			shortSeriesBookTitle?: string;
 
 			volumeSeries?: Array<{
@@ -74,63 +73,346 @@ function getBestIsbn(
 		)?.identifier;
 
 	return (
-		normalizeIsbn(isbn13) ??
-		normalizeIsbn(isbn10)
+		normalizeIsbn(
+			isbn13,
+		) ??
+		normalizeIsbn(
+			isbn10,
+		)
 	);
 }
 
+function getSeriesIndex(
+	volume: GoogleVolume,
+): string | undefined {
+	const info =
+		volume.volumeInfo
+			?.seriesInfo;
+
+	const order =
+		info
+			?.volumeSeries?.[0]
+			?.orderNumber;
+
+	if (
+		order !== undefined &&
+		order !== null
+	) {
+		return String(order);
+	}
+
+	return info
+		?.bookDisplayNumber
+		?.match(
+			/\d+(?:[.,]\d+)?/,
+		)?.[0]
+		?.replace(
+			",",
+			".",
+		);
+}
+
+function mapVolume(
+	volume: GoogleVolume,
+): BookMetadata {
+	const info =
+		volume.volumeInfo;
+
+	return {
+		title:
+			cleanText(
+				info?.title,
+			),
+
+		author:
+			cleanText(
+				info?.authors?.[0],
+			),
+
+		description:
+			cleanText(
+				info?.description,
+			),
+
+		language:
+			info?.language,
+
+		isbn:
+			getBestIsbn(
+				volume,
+			),
+
+		publisher:
+			cleanText(
+				info?.publisher,
+			),
+
+		published:
+			normalizePublicationDate(
+				info?.publishedDate,
+			),
+
+		pageCount:
+			info?.pageCount,
+
+		seriesIndex:
+			getSeriesIndex(
+				volume,
+			),
+
+		subjects:
+			info?.categories
+				?.map(
+					(value) =>
+						cleanText(
+							value,
+						),
+				)
+				.filter(
+					(
+						value,
+					): value is string =>
+						!!value,
+				),
+	};
+}
+
+function buildQuery(
+	hypothesis:
+		SearchHypothesis,
+): string | undefined {
+	const hints =
+		hypothesis.hints;
+
+	if (hints.isbn) {
+		return `isbn:${hints.isbn}`;
+	}
+
+	if (
+		hypothesis.kind ===
+			"title" &&
+		hints.title
+	) {
+		const parts = [
+			`intitle:"${hints.title}"`,
+		];
+
+		if (hints.author) {
+			parts.push(
+				`inauthor:"${hints.author}"`,
+			);
+		}
+
+		return parts.join(" ");
+	}
+
+	if (
+		hypothesis.kind ===
+			"series" &&
+		hints.series
+	) {
+		const parts = [
+			`"${hints.series}"`,
+		];
+
+		if (hints.author) {
+			parts.push(
+				`inauthor:"${hints.author}"`,
+			);
+		}
+
+		return parts.join(" ");
+	}
+
+	return undefined;
+}
+
+function scoreCandidate(
+	hypothesis:
+		SearchHypothesis,
+	volume:
+		GoogleVolume,
+	metadata:
+		BookMetadata,
+): number {
+	const hints =
+		hypothesis.hints;
+
+	if (
+		hypothesis.kind ===
+		"isbn"
+	) {
+		const expected =
+			normalizeIsbn(
+				hints.isbn,
+			);
+
+		const identifiers =
+			volume.volumeInfo
+				?.industryIdentifiers ??
+			[];
+
+		const matches =
+			identifiers.some(
+				(identifier) =>
+					normalizeIsbn(
+						identifier.identifier,
+					) === expected,
+			);
+
+		return expected && matches
+			? 100
+			: 0;
+	}
+
+	if (
+		hypothesis.kind ===
+		"title"
+	) {
+		let score =
+			scoreTitleMatch(
+				hints,
+				metadata,
+			);
+
+		if (
+			hints.language &&
+			metadata.language &&
+			!languageMatches(
+				hints.language,
+				metadata.language,
+			)
+		) {
+			score -= 15;
+		}
+
+		score *=
+			0.88 +
+			0.12 *
+				hypothesis.confidence;
+
+		return Math.round(
+			clamp(score),
+		);
+	}
+
+	if (
+		hypothesis.kind ===
+			"series"
+	) {
+		const expectedIndex =
+			hints.seriesIndex;
+
+		const actualIndex =
+			getSeriesIndex(
+				volume,
+			);
+
+		/*
+		 * Google can only resolve a
+		 * series hypothesis if its own
+		 * seriesInfo confirms the volume
+		 * position. Merely finding the
+		 * series words in search results
+		 * is not enough.
+		 */
+		if (
+			!expectedIndex ||
+			!actualIndex ||
+			!sameSeriesIndex(
+				expectedIndex,
+				actualIndex,
+			)
+		) {
+			return 0;
+		}
+
+		let score = 70;
+
+		if (hints.author) {
+			const authorScore =
+				authorSimilarity(
+					hints.author,
+					metadata.author,
+				);
+
+			if (
+				metadata.author &&
+				authorScore < 0.5
+			) {
+				return 0;
+			}
+
+			score +=
+				authorScore *
+				30;
+		}
+
+		score *=
+			0.88 +
+			0.12 *
+				hypothesis.confidence;
+
+		return Math.round(
+			clamp(score),
+		);
+	}
+
+	return 0;
+}
+
 export async function lookupGoogleBooks(
-	query: FilenameMetadata & {
-		isbn?: string;
-	},
+	hypothesis:
+		SearchHypothesis,
 	apiKey?: string,
 ): Promise<
 	MetadataCandidate | undefined
 > {
-	if (!apiKey) {
+	const searchQuery =
+		buildQuery(
+			hypothesis,
+		);
+
+	if (!searchQuery) {
 		return undefined;
-	}
-
-	let searchQuery: string;
-
-	if (query.isbn) {
-		searchQuery =
-			`isbn:${query.isbn}`;
-	} else {
-		if (!query.title) {
-			return undefined;
-		}
-
-		const parts = [
-			`intitle:"${query.title}"`,
-		];
-
-		if (query.author) {
-			parts.push(
-				`inauthor:"${query.author}"`,
-			);
-		}
-
-		searchQuery =
-			parts.join(" ");
 	}
 
 	const params =
 		new URLSearchParams({
-			q: searchQuery,
-
-			key:
-				apiKey,
+			q:
+				searchQuery,
 
 			maxResults:
-				"10",
+				"20",
 
 			projection:
 				"full",
-
-			langRestrict:
-				"es",
 		});
+
+	if (apiKey) {
+		params.set(
+			"key",
+			apiKey,
+		);
+	}
+
+	const language =
+		hypothesis.hints
+			.language
+			?.slice(0, 2)
+			.toLowerCase();
+
+	if (
+		language &&
+		/^[a-z]{2}$/.test(
+			language,
+		)
+	) {
+		params.set(
+			"langRestrict",
+			language,
+		);
+	}
 
 	try {
 		const response =
@@ -145,6 +427,11 @@ export async function lookupGoogleBooks(
 			);
 
 		if (!response.ok) {
+			console.log(
+				"[Google Books] HTTP",
+				response.status,
+			);
+
 			return undefined;
 		}
 
@@ -159,85 +446,57 @@ export async function lookupGoogleBooks(
 			const item
 			of data.items ?? []
 		) {
-			const info =
-				item.volumeInfo;
-
-			if (!info) {
+			if (
+				!item.volumeInfo
+					?.title
+			) {
 				continue;
 			}
 
-			const order =
-				info.seriesInfo
-					?.volumeSeries?.[0]
-					?.orderNumber;
+			const metadata =
+				mapVolume(
+					item,
+				);
 
-			const metadata = {
-				title:
-					cleanText(
-						info.title,
-					),
-
-				author:
-					cleanText(
-						info.authors?.[0],
-					),
-
-				description:
-					cleanText(
-						info.description,
-					),
-
-				language:
-					info.language,
-
-				isbn:
-					getBestIsbn(
-						item,
-					),
-
-				publisher:
-					cleanText(
-						info.publisher,
-					),
-
-				published:
-					cleanText(
-						info.publishedDate,
-					),
-
-				pageCount:
-					info.pageCount,
-
-				/*
-				 * Google exposes seriesInfo,
-				 * but not always a reliable
-				 * human-readable series title.
-				 *
-				 * Do NOT confuse
-				 * shortSeriesBookTitle with
-				 * the series name.
-				 */
-				seriesIndex:
-					order !== undefined
-						? String(order)
-						: undefined,
-
-				subjects:
-					info.categories
-						?.map(cleanText)
-						.filter(
-							(
-								value,
-							): value is string =>
-								!!value,
-						),
-			};
+			/*
+			 * Google Books does not give us
+			 * a reliable human-readable
+			 * series name in volumeInfo.
+			 *
+			 * If seriesInfo confirms the
+			 * requested position, we retain
+			 * the queried series name as the
+			 * confirmed series label.
+			 */
+			if (
+				hypothesis.kind ===
+					"series" &&
+				hypothesis.hints
+					.series &&
+				sameSeriesIndex(
+					hypothesis.hints
+						.seriesIndex,
+					metadata
+						.seriesIndex,
+				)
+			) {
+				metadata.series =
+					hypothesis.hints
+						.series;
+			}
 
 			const score =
-				scoreBookMatch(
-					query,
+				scoreCandidate(
+					hypothesis,
+					item,
 					metadata,
 				);
+
+			if (
+				score <= 0
+			) {
+				continue;
+			}
 
 			if (
 				!best ||
@@ -256,19 +515,20 @@ export async function lookupGoogleBooks(
 						item.id
 							? `https://books.google.com/books?id=${encodeURIComponent(item.id)}`
 							: undefined,
+
+					matchedHypothesis:
+						hypothesis,
 				};
 			}
 		}
 
-		if (
-			!best ||
-			best.score < 65
-		) {
-			return undefined;
-		}
-
 		return best;
-	} catch {
+	} catch (error) {
+		console.log(
+			"[Google Books] fetch failed:",
+			error,
+		);
+
 		return undefined;
 	}
 }

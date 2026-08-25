@@ -1,12 +1,16 @@
 import {
+	clamp,
 	cleanText,
+	languageMatches,
 	normalizeIsbn,
-	scoreBookMatch,
+	normalizePublicationDate,
+	scoreTitleMatch,
 } from "../normalize";
 
 import type {
-	FilenameMetadata,
+	BookMetadata,
 	MetadataCandidate,
+	SearchHypothesis,
 } from "../types";
 
 interface SearchResponse {
@@ -15,22 +19,13 @@ interface SearchResponse {
 
 interface SearchDocument {
 	key?: string;
-
 	title?: string;
-
 	author_name?: string[];
-
 	first_publish_year?: number;
-
 	isbn?: string[];
-
 	publisher?: string[];
-
 	language?: string[];
-
 	subject?: string[];
-
-	series?: string[];
 }
 
 interface WorkResponse {
@@ -39,6 +34,36 @@ interface WorkResponse {
 		| {
 				value?: string;
 		  };
+	subjects?: string[];
+}
+
+interface EditionResponse {
+	key?: string;
+	title?: string;
+	publish_date?: string;
+	number_of_pages?: number;
+	publishers?: string[];
+	languages?: Array<{
+		key?: string;
+	}>;
+	authors?: Array<{
+		key?: string;
+	}>;
+	works?: Array<{
+		key?: string;
+	}>;
+	subjects?: Array<
+		| string
+		| {
+				name?: string;
+		  }
+	>;
+	isbn_10?: string[];
+	isbn_13?: string[];
+}
+
+interface AuthorResponse {
+	name?: string;
 }
 
 function mapLanguage(
@@ -48,121 +73,272 @@ function mapLanguage(
 		return undefined;
 	}
 
-	const map:
-		Record<string, string> = {
-			spa: "es",
-			eng: "en",
-			fra: "fr",
-			fre: "fr",
-			deu: "de",
-			ger: "de",
-			ita: "it",
-			por: "pt",
-			cat: "ca",
-			glg: "gl",
-			eus: "eu",
-		};
+	const clean = value
+		.replace(/^\/languages\//, "")
+		.trim()
+		.toLowerCase();
 
-	return (
-		map[
-			value.toLowerCase()
-		] ??
-		value
-	);
+	const map: Record<string, string> = {
+		spa: "es",
+		eng: "en",
+		fra: "fr",
+		fre: "fr",
+		deu: "de",
+		ger: "de",
+		ita: "it",
+		por: "pt",
+		cat: "ca",
+		glg: "gl",
+		eus: "eu",
+	};
+
+	return map[clean] ?? clean;
 }
 
-async function getDescription(
+async function fetchJson<T>(
+	url: string,
+	timeout = 5000,
+): Promise<T | undefined> {
+	try {
+		const response = await fetch(url, {
+			headers: {
+				Accept: "application/json",
+			},
+			signal: AbortSignal.timeout(timeout),
+		});
+
+		if (!response.ok) {
+			console.log(
+				"[Open Library] HTTP",
+				response.status,
+				url,
+			);
+			return undefined;
+		}
+
+		return (await response.json()) as T;
+	} catch (error) {
+		console.log(
+			"[Open Library] fetch failed:",
+			url,
+			error,
+		);
+		return undefined;
+	}
+}
+
+async function getDescriptionAndSubjects(
 	key?: string,
-): Promise<
-	string | undefined
-> {
+): Promise<{
+	description?: string;
+	subjects?: string[];
+}> {
+	if (!key) {
+		return {};
+	}
+
+	const workId = key
+		.replace(/^\/?works\//, "")
+		.replace(/^\//, "")
+		.trim();
+
+	if (!/^OL\d+W$/i.test(workId)) {
+		return {};
+	}
+
+	const work = await fetchJson<WorkResponse>(
+		`https://openlibrary.org/works/${encodeURIComponent(workId)}.json`,
+	);
+
+	if (!work) {
+		return {};
+	}
+
+	const description =
+		typeof work.description === "string"
+			? cleanText(work.description)
+			: cleanText(work.description?.value);
+
+	const subjects = work.subjects
+		?.slice(0, 12)
+		.map((value) => cleanText(value))
+		.filter((value): value is string => !!value);
+
+	return {
+		description,
+		subjects,
+	};
+}
+
+async function getAuthorName(
+	key?: string,
+): Promise<string | undefined> {
 	if (!key) {
 		return undefined;
 	}
 
-	const workId =
-		key
-			.replace(
-				/^\/?works\//,
-				"",
-			)
-			.trim();
+	const normalizedKey = key.startsWith("/")
+		? key
+		: `/authors/${key}`;
+
+	const author = await fetchJson<AuthorResponse>(
+		`https://openlibrary.org${normalizedKey}.json`,
+	);
+
+	return cleanText(author?.name);
+}
+
+function bestIsbn(
+	values?: string[],
+): string | undefined {
+	const normalized = (values ?? [])
+		.map((value) => normalizeIsbn(value))
+		.filter((value): value is string => !!value);
+
+	return (
+		normalized.find((value) => value.length === 13) ??
+		normalized[0]
+	);
+}
+
+function mapDocument(
+	doc: SearchDocument,
+): BookMetadata {
+	return {
+		title: cleanText(doc.title),
+		author: cleanText(doc.author_name?.[0]),
+		language: mapLanguage(doc.language?.[0]),
+		isbn: bestIsbn(doc.isbn),
+		publisher: cleanText(doc.publisher?.[0]),
+		published: doc.first_publish_year
+			? String(doc.first_publish_year)
+			: undefined,
+		subjects: doc.subject
+			?.slice(0, 12)
+			.map((value) => cleanText(value))
+			.filter((value): value is string => !!value),
+	};
+}
+
+async function lookupExactIsbn(
+	hypothesis: SearchHypothesis,
+): Promise<MetadataCandidate | undefined> {
+	const isbn = normalizeIsbn(
+		hypothesis.hints.isbn,
+	);
+
+	if (!isbn) {
+		return undefined;
+	}
+
+	const edition = await fetchJson<EditionResponse>(
+		`https://openlibrary.org/isbn/${encodeURIComponent(isbn)}.json`,
+	);
+
+	if (!edition?.title) {
+		return undefined;
+	}
+
+	const exactIsbns = [
+		...(edition.isbn_13 ?? []),
+		...(edition.isbn_10 ?? []),
+	]
+		.map((value) => normalizeIsbn(value))
+		.filter((value): value is string => !!value);
 
 	if (
-		!/^OL\d+W$/i.test(
-			workId,
-		)
+		exactIsbns.length > 0 &&
+		!exactIsbns.includes(isbn)
 	) {
 		return undefined;
 	}
 
-	try {
-		const response =
-			await fetch(
-				`https://openlibrary.org/works/${encodeURIComponent(workId)}.json`,
-				{
-					signal:
-						AbortSignal.timeout(
-							5000,
-						),
-				},
-			);
+	const [author, workData] = await Promise.all([
+		getAuthorName(
+			edition.authors?.[0]?.key,
+		),
+		getDescriptionAndSubjects(
+			edition.works?.[0]?.key,
+		),
+	]);
 
-		if (!response.ok) {
-			return undefined;
-		}
+	const editionSubjects = edition.subjects
+		?.map((subject) =>
+			typeof subject === "string"
+				? cleanText(subject)
+				: cleanText(subject.name),
+		)
+		.filter((value): value is string => !!value);
 
-		const work =
-			(await response.json()) as WorkResponse;
+	const subjects = [
+		...(editionSubjects ?? []),
+		...(workData.subjects ?? []),
+	].filter(
+		(value, index, array) =>
+			array.findIndex(
+				(other) =>
+					other.toLowerCase() ===
+					value.toLowerCase(),
+			) === index,
+	);
 
-		if (
-			typeof work.description ===
-			"string"
-		) {
-			return cleanText(
-				work.description,
-			);
-		}
+	const metadata: BookMetadata = {
+		title: cleanText(edition.title),
+		author,
+		description: workData.description,
+		language: mapLanguage(
+			edition.languages?.[0]?.key,
+		),
+		isbn,
+		publisher: cleanText(
+			edition.publishers?.[0],
+		),
+		published: normalizePublicationDate(
+			edition.publish_date,
+		),
+		pageCount:
+			edition.number_of_pages &&
+			edition.number_of_pages > 0
+				? edition.number_of_pages
+				: undefined,
+		subjects:
+			subjects.length > 0
+				? subjects.slice(0, 12)
+				: undefined,
+	};
 
-		return cleanText(
-			work.description?.value,
-		);
-	} catch {
-		return undefined;
-	}
+	return {
+		source: "open-library",
+		metadata,
+		score: 100,
+		url: edition.key
+			? `https://openlibrary.org${edition.key}`
+			: `https://openlibrary.org/isbn/${isbn}`,
+		matchedHypothesis: hypothesis,
+	};
 }
 
-export async function lookupOpenLibrary(
-	query: FilenameMetadata & {
-		isbn?: string;
-	},
-): Promise<
-	MetadataCandidate | undefined
-> {
-	const params =
-		new URLSearchParams();
+async function lookupSearch(
+	hypothesis: SearchHypothesis,
+): Promise<MetadataCandidate | undefined> {
+	if (hypothesis.kind === "series") {
+		return undefined;
+	}
 
-	if (query.isbn) {
-		params.set(
-			"isbn",
-			query.isbn,
-		);
+	const hints = hypothesis.hints;
+	const params = new URLSearchParams();
+
+	if (
+		hypothesis.kind === "title" &&
+		hints.title
+	) {
+		params.set("title", hints.title);
+
+		if (hints.author) {
+			params.set("author", hints.author);
+		}
 	} else {
-		if (!query.title) {
-			return undefined;
-		}
-
-		params.set(
-			"title",
-			query.title,
-		);
-
-		if (query.author) {
-			params.set(
-				"author",
-				query.author,
-			);
-		}
+		return undefined;
 	}
 
 	params.set(
@@ -176,236 +352,116 @@ export async function lookupOpenLibrary(
 			"publisher",
 			"language",
 			"subject",
-			"series",
 		].join(","),
 	);
-
 	params.set("limit", "10");
 
-	try {
-		const response =
-			await fetch(
-				`https://openlibrary.org/search.json?${params.toString()}`,
-				{
-					signal:
-						AbortSignal.timeout(
-							5000,
-						),
-				},
-			);
+	const language = hints.language
+		?.slice(0, 2)
+		.toLowerCase();
 
-		if (!response.ok) {
-			return undefined;
-		}
+	if (
+		language &&
+		/^[a-z]{2}$/.test(language)
+	) {
+		params.set("lang", language);
+	}
 
-		const data =
-			(await response.json()) as SearchResponse;
+	const data = await fetchJson<SearchResponse>(
+		`https://openlibrary.org/search.json?${params.toString()}`,
+	);
 
-		let bestDoc:
-			| SearchDocument
-			| undefined;
-
-		let bestScore = 0;
-
-		for (
-			const doc
-			of data.docs ?? []
-		) {
-			const isbn13 =
-				doc.isbn
-					?.map(
-						normalizeIsbn,
-					)
-					.find(
-						(value) =>
-							value
-								?.length ===
-							13,
-					);
-
-			const anyIsbn =
-				doc.isbn
-					?.map(
-						normalizeIsbn,
-					)
-					.find(Boolean);
-
-			const metadata = {
-				title:
-					cleanText(
-						doc.title,
-					),
-
-				author:
-					cleanText(
-						doc
-							.author_name?.[0],
-					),
-
-				language:
-					mapLanguage(
-						doc
-							.language?.[0],
-					),
-
-				isbn:
-					isbn13 ??
-					anyIsbn,
-
-				publisher:
-					cleanText(
-						doc
-							.publisher?.[0],
-					),
-
-				published:
-					doc
-						.first_publish_year
-						? String(
-								doc.first_publish_year,
-							)
-						: undefined,
-
-				series:
-					cleanText(
-						doc
-							.series?.[0],
-					),
-
-				subjects:
-					doc.subject
-						?.slice(
-							0,
-							10,
-						)
-						.map(
-							cleanText,
-						)
-						.filter(
-							(
-								value,
-							): value is string =>
-								!!value,
-						),
-			};
-
-			const score =
-				scoreBookMatch(
-					query,
-					metadata,
-				);
-
-			if (
-				score >
-				bestScore
-			) {
-				bestScore =
-					score;
-
-				bestDoc =
-					doc;
-			}
-		}
-
-		if (
-			!bestDoc ||
-			bestScore < 70
-		) {
-			return undefined;
-		}
-
-		const isbn13 =
-			bestDoc.isbn
-				?.map(
-					normalizeIsbn,
-				)
-				.find(
-					(value) =>
-						value?.length ===
-						13,
-				);
-
-		return {
-			source:
-				"open-library",
-
-			score:
-				bestScore,
-
-			url:
-				bestDoc.key
-					? `https://openlibrary.org${bestDoc.key.startsWith("/") ? "" : "/works/"}${bestDoc.key}`
-					: undefined,
-
-			metadata: {
-				title:
-					cleanText(
-						bestDoc.title,
-					),
-
-				author:
-					cleanText(
-						bestDoc
-							.author_name?.[0],
-					),
-
-				description:
-					await getDescription(
-						bestDoc.key,
-					),
-
-				language:
-					mapLanguage(
-						bestDoc
-							.language?.[0],
-					),
-
-				isbn:
-					isbn13 ??
-					bestDoc.isbn
-						?.map(
-							normalizeIsbn,
-						)
-						.find(Boolean),
-
-				publisher:
-					cleanText(
-						bestDoc
-							.publisher?.[0],
-					),
-
-				published:
-					bestDoc
-						.first_publish_year
-						? String(
-								bestDoc.first_publish_year,
-							)
-						: undefined,
-
-				series:
-					cleanText(
-						bestDoc
-							.series?.[0],
-					),
-
-				subjects:
-					bestDoc.subject
-						?.slice(
-							0,
-							10,
-						)
-						.map(
-							cleanText,
-						)
-						.filter(
-							(
-								value,
-							): value is string =>
-								!!value,
-						),
-			},
-		};
-	} catch {
+	if (!data) {
 		return undefined;
 	}
+
+	let bestDoc: SearchDocument | undefined;
+	let bestMetadata: BookMetadata | undefined;
+	let bestScore = 0;
+
+	for (const doc of data.docs ?? []) {
+		const metadata = mapDocument(doc);
+
+		let score = scoreTitleMatch(
+			hints,
+			metadata,
+		);
+
+		if (
+			hints.language &&
+			metadata.language &&
+			!languageMatches(
+				hints.language,
+				metadata.language,
+			)
+		) {
+			score -= 15;
+		}
+
+		score *=
+			0.88 +
+			0.12 * hypothesis.confidence;
+
+		score = Math.round(
+			clamp(score),
+		);
+
+		if (score > bestScore) {
+			bestScore = score;
+			bestDoc = doc;
+			bestMetadata = metadata;
+		}
+	}
+
+	if (
+		!bestDoc ||
+		!bestMetadata ||
+		bestScore <= 0
+	) {
+		return undefined;
+	}
+
+	const workData = await getDescriptionAndSubjects(
+		bestDoc.key,
+	);
+
+	bestMetadata.description =
+		workData.description;
+
+	if (
+		(!bestMetadata.subjects ||
+			bestMetadata.subjects.length === 0) &&
+		workData.subjects?.length
+	) {
+		bestMetadata.subjects =
+			workData.subjects;
+	}
+
+	let url: string | undefined;
+
+	if (bestDoc.key) {
+		const key = bestDoc.key.startsWith("/")
+			? bestDoc.key
+			: `/works/${bestDoc.key}`;
+
+		url = `https://openlibrary.org${key}`;
+	}
+
+	return {
+		source: "open-library",
+		metadata: bestMetadata,
+		score: bestScore,
+		url,
+		matchedHypothesis: hypothesis,
+	};
+}
+
+export async function lookupOpenLibrary(
+	hypothesis: SearchHypothesis,
+): Promise<MetadataCandidate | undefined> {
+	if (hypothesis.kind === "isbn") {
+		return lookupExactIsbn(hypothesis);
+	}
+
+	return lookupSearch(hypothesis);
 }

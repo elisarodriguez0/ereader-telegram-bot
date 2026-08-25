@@ -1,13 +1,15 @@
 import {
 	authorSimilarity,
-	cleanText,
-	normalizeText,
-	wordSimilarity,
+	clamp,
+	sameSeriesIndex,
+	scoreSeriesMatch,
+	scoreTitleMatch,
+	titleSimilarity,
 } from "../normalize";
 
 import type {
-	FilenameMetadata,
 	MetadataCandidate,
+	SearchHypothesis,
 } from "../types";
 
 const DEFAULT_BASE_URL =
@@ -18,37 +20,37 @@ const REQUEST_HEADERS = {
 		"text/html,application/xhtml+xml",
 
 	"User-Agent":
-		"Mozilla/5.0 (compatible; EreaderSync/0.4; personal-library)",
+		"Mozilla/5.0 (compatible; EreaderSync/0.6; personal-library)",
 };
-
-interface SeriesHint {
-	name?: string;
-	index?: string;
-}
 
 interface ParsedLectulandiaBook {
 	url: string;
-
 	title?: string;
 	author?: string;
-
 	series?: string;
 	seriesIndex?: string;
-
 	description?: string;
-
 	subjects?: string[];
 }
-
-/* -------------------------------------------------------------------------- */
-/*  Normalization                                                             */
-/* -------------------------------------------------------------------------- */
 
 function slugify(
 	value: string,
 ): string {
-	return normalizeText(value)
-		.replace(/\s+/g, "-");
+	return value
+		.normalize("NFD")
+		.replace(
+			/[\u0300-\u036f]/g,
+			"",
+		)
+		.toLowerCase()
+		.replace(
+			/[^a-z0-9]+/g,
+			"-",
+		)
+		.replace(
+			/^-+|-+$/g,
+			"",
+		);
 }
 
 function decodeHtmlEntities(
@@ -62,21 +64,38 @@ function decodeHtmlEntities(
 		.replace(/&apos;/gi, "'")
 		.replace(/&lt;/gi, "<")
 		.replace(/&gt;/gi, ">")
-
 		.replace(/&aacute;/gi, "á")
 		.replace(/&eacute;/gi, "é")
 		.replace(/&iacute;/gi, "í")
 		.replace(/&oacute;/gi, "ó")
 		.replace(/&uacute;/gi, "ú")
 		.replace(/&uuml;/gi, "ü")
-		.replace(/&ntilde;/gi, "ñ");
+		.replace(/&ntilde;/gi, "ñ")
+		.replace(
+			/&#(\d+);/g,
+			(_, code: string) =>
+				String.fromCodePoint(
+					Number(code),
+				),
+		)
+		.replace(
+			/&#x([0-9a-f]+);/gi,
+			(_, code: string) =>
+				String.fromCodePoint(
+					parseInt(
+						code,
+						16,
+					),
+				),
+		);
 }
 
 function htmlToText(
 	html: string,
 	preserveBreaks = false,
 ): string | undefined {
-	let value = html;
+	let value =
+		html;
 
 	if (preserveBreaks) {
 		value = value
@@ -105,7 +124,9 @@ function htmlToText(
 		);
 
 	value =
-		decodeHtmlEntities(value);
+		decodeHtmlEntities(
+			value,
+		);
 
 	if (preserveBreaks) {
 		value = value
@@ -128,13 +149,11 @@ function htmlToText(
 	return value || undefined;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  HTTP                                                                      */
-/* -------------------------------------------------------------------------- */
-
 async function fetchHtml(
 	url: string,
-): Promise<string | undefined> {
+): Promise<
+	string | undefined
+> {
 	try {
 		const response =
 			await fetch(
@@ -167,15 +186,11 @@ async function fetchHtml(
 		const html =
 			await response.text();
 
-		/*
-		 * Do not attempt to bypass
-		 * Cloudflare challenges.
-		 */
 		if (
 			/cloudflare|just a moment|cf-chl|challenge-platform/i.test(
 				html.slice(
 					0,
-					10000,
+					12000,
 				),
 			)
 		) {
@@ -199,85 +214,6 @@ async function fetchHtml(
 	}
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Filename hints                                                            */
-/* -------------------------------------------------------------------------- */
-
-function extractSeriesHint(
-	title?: string,
-): SeriesHint {
-	if (!title) {
-		return {};
-	}
-
-	const value = title
-		.replace(
-			/\.(epub|mobi|azw3)$/i,
-			"",
-		)
-		.trim();
-
-	const patterns = [
-		/*
-		 * El Reino De Los Malditos Vol. 3
-		 * El Reino De Los Malditos Volumen 3
-		 * El Reino De Los Malditos Libro 3
-		 * El Reino De Los Malditos Tomo 3
-		 */
-		/^(.*?)\s+(?:vol(?:umen)?|tomo|libro|book)\.?\s*#?\s*(\d+(?:\.\d+)?)$/i,
-
-		/*
-		 * El Reino De Los Malditos #3
-		 */
-		/^(.*?)\s*#\s*(\d+(?:\.\d+)?)$/i,
-
-		/*
-		 * El Reino De Los Malditos - 3
-		 */
-		/^(.*?)\s+-\s*(\d+(?:\.\d+)?)$/i,
-
-		/*
-		 * El Reino De Los Malditos 3
-		 *
-		 * Lowest priority because a
-		 * number can theoretically be
-		 * part of a real title.
-		 */
-		/^(.*?)\s+(\d+(?:\.\d+)?)$/i,
-	];
-
-	for (const pattern of patterns) {
-		const match =
-			value.match(pattern);
-
-		if (!match) {
-			continue;
-		}
-
-		const name =
-			cleanText(match[1]);
-
-		const index =
-			match[2];
-
-		if (
-			name &&
-			index
-		) {
-			return {
-				name,
-				index,
-			};
-		}
-	}
-
-	return {};
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Exact Lectulandia blocks                                                  */
-/* -------------------------------------------------------------------------- */
-
 function extractBlock(
 	html: string,
 	id: string,
@@ -294,7 +230,9 @@ function extractBlock(
 			"i",
 		);
 
-	return regex.exec(html)?.[1];
+	return regex.exec(
+		html,
+	)?.[1];
 }
 
 function extractTitle(
@@ -306,12 +244,8 @@ function extractTitle(
 			"title",
 		);
 
-	if (!block) {
-		return undefined;
-	}
-
 	const h1 =
-		block.match(
+		block?.match(
 			/<h1\b[^>]*>([\s\S]*?)<\/h1>/i,
 		)?.[1];
 
@@ -329,12 +263,8 @@ function extractAuthor(
 			"autor",
 		);
 
-	if (!block) {
-		return undefined;
-	}
-
 	const anchor =
-		block.match(
+		block?.match(
 			/<a\b[^>]*>([\s\S]*?)<\/a>/i,
 		)?.[1];
 
@@ -345,7 +275,10 @@ function extractAuthor(
 
 function extractSeries(
 	html: string,
-): SeriesHint {
+): {
+	series?: string;
+	seriesIndex?: string;
+} {
 	const block =
 		extractBlock(
 			html,
@@ -355,18 +288,6 @@ function extractSeries(
 	if (!block) {
 		return {};
 	}
-
-	/*
-	 * Exact Lectulandia structure:
-	 *
-	 * <span class="tagTitle">
-	 *   Libro 1 de:
-	 * </span>
-	 *
-	 * <a ...>
-	 *   El reino de los Malditos
-	 * </a>
-	 */
 
 	const label =
 		block.match(
@@ -383,21 +304,22 @@ function extractSeries(
 			? htmlToText(label)
 			: undefined;
 
-	const series =
-		anchor
-			? htmlToText(anchor)
-			: undefined;
-
-	const index =
-		labelText?.match(
-			/Libro\s+(\d+(?:\.\d+)?)\s+de:/i,
-		)?.[1];
-
 	return {
-		name:
-			series,
+		series:
+			anchor
+				? htmlToText(
+						anchor,
+					)
+				: undefined,
 
-		index,
+		seriesIndex:
+			labelText?.match(
+				/Libro\s+(\d+(?:[.,]\d+)?)\s+de:/i,
+			)?.[1]
+				?.replace(
+					",",
+					".",
+				),
 	};
 }
 
@@ -425,7 +347,8 @@ function extractSubjects(
 		| null;
 
 	while (
-		(match = regex.exec(block))
+		(match =
+			regex.exec(block))
 	) {
 		const subject =
 			htmlToText(
@@ -453,23 +376,10 @@ function extractDescription(
 	html: string,
 ): string | undefined {
 	/*
-	 * IMPORTANT:
-	 *
-	 * Description comes ONLY from:
-	 *
-	 *     <div id="sinopsis">
-	 *
-	 * We never use:
-	 * - meta description
-	 * - paragraphs around genres
-	 * - comments
-	 * - page text
-	 * - OpenGraph
-	 *
-	 * If #sinopsis is absent, Lectulandia
-	 * has no description for our purposes.
+	 * STRICT:
+	 * The description comes ONLY from
+	 * <div id="sinopsis">.
 	 */
-
 	const block =
 		extractBlock(
 			html,
@@ -486,51 +396,35 @@ function extractDescription(
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Book page                                                                 */
-/* -------------------------------------------------------------------------- */
-
 function parseBookPage(
 	html: string,
 	url: string,
 ): ParsedLectulandiaBook {
 	const series =
-		extractSeries(html);
+		extractSeries(
+			html,
+		);
 
 	return {
 		url,
-
 		title:
-			extractTitle(
-				html,
-			),
-
+			extractTitle(html),
 		author:
-			extractAuthor(
-				html,
-			),
-
+			extractAuthor(html),
 		series:
-			series.name,
-
+			series.series,
 		seriesIndex:
-			series.index,
-
+			series.seriesIndex,
 		description:
 			extractDescription(
 				html,
 			),
-
 		subjects:
 			extractSubjects(
 				html,
 			),
 	};
 }
-
-/* -------------------------------------------------------------------------- */
-/*  Discovery                                                                 */
-/* -------------------------------------------------------------------------- */
 
 function extractBookUrls(
 	html: string,
@@ -547,18 +441,18 @@ function extractBookUrls(
 		| null;
 
 	while (
-		(match = regex.exec(html))
+		(match =
+			regex.exec(html))
 	) {
 		try {
-			const url =
+			urls.add(
 				new URL(
 					match[1],
 					baseUrl,
-				).toString();
-
-			urls.add(url);
+				).toString(),
+			);
 		} catch {
-			// Ignore malformed URL.
+			// Ignore malformed URLs.
 		}
 	}
 
@@ -566,20 +460,37 @@ function extractBookUrls(
 }
 
 async function discoverCandidateUrls(
-	query: FilenameMetadata,
+	hypothesis:
+		SearchHypothesis,
 	baseUrl: string,
-	seriesHint: SeriesHint,
 ): Promise<string[]> {
 	const urls =
 		new Set<string>();
 
+	const hints =
+		hypothesis.hints;
+
 	/*
-	 * Source 1:
-	 * author page.
+	 * Exact/direct title lookup.
+	 * This makes title-only filenames useful
+	 * even when there is no author.
 	 */
-	if (query.author) {
+	if (hints.title) {
+		const slug =
+			slugify(
+				hints.title,
+			);
+
+		if (slug) {
+			urls.add(
+				`${baseUrl}/book/${slug}/`,
+			);
+		}
+	}
+
+	if (hints.author) {
 		const authorUrl =
-			`${baseUrl}/autor/${slugify(query.author)}/`;
+			`${baseUrl}/autor/${slugify(hints.author)}/`;
 
 		const html =
 			await fetchHtml(
@@ -599,21 +510,12 @@ async function discoverCandidateUrls(
 		}
 	}
 
-	/*
-	 * Source 2:
-	 * series page.
-	 *
-	 * This is especially useful when the
-	 * filename is:
-	 *
-	 * El Reino De Los Malditos Vol. 3
-	 *
-	 * because we know the series even
-	 * though we DON'T know the book title.
-	 */
-	if (seriesHint.name) {
+	if (
+		hints.series &&
+		hints.seriesIndex
+	) {
 		const seriesUrl =
-			`${baseUrl}/serie/${slugify(seriesHint.name)}/`;
+			`${baseUrl}/serie/${slugify(hints.series)}/`;
 
 		const html =
 			await fetchHtml(
@@ -636,115 +538,71 @@ async function discoverCandidateUrls(
 	return [...urls];
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Matching                                                                  */
-/* -------------------------------------------------------------------------- */
-
 function scoreCandidate(
-	book: ParsedLectulandiaBook,
-	query: FilenameMetadata,
-	seriesHint: SeriesHint,
+	hypothesis:
+		SearchHypothesis,
+	book:
+		ParsedLectulandiaBook,
 ): number {
 	let score = 0;
 
-	/*
-	 * AUTHOR
-	 *
-	 * Very strong identity signal.
-	 */
 	if (
-		query.author &&
-		book.author
+		hypothesis.kind ===
+		"title"
 	) {
-		score +=
-			authorSimilarity(
-				query.author,
-				book.author,
-			) * 30;
+		score =
+			scoreTitleMatch(
+				hypothesis.hints,
+				book,
+			);
+	} else if (
+		hypothesis.kind ===
+		"series"
+	) {
+		score =
+			scoreSeriesMatch(
+				hypothesis.hints,
+				book,
+			);
 	}
 
 	/*
-	 * SERIES
-	 *
-	 * Filename may contain series instead
-	 * of the actual book title.
+	 * Hypothesis confidence is a small
+	 * modifier, not a replacement for the
+	 * actual provider match.
 	 */
-	if (
-		seriesHint.name &&
-		book.series
-	) {
-		score +=
-			wordSimilarity(
-				seriesHint.name,
-				book.series,
-			) * 45;
-	}
+	score *=
+		0.88 +
+		0.12 *
+			hypothesis.confidence;
 
-	/*
-	 * SERIES POSITION
-	 *
-	 * Exact volume is extremely strong.
-	 */
-	if (
-		seriesHint.index &&
-		book.seriesIndex
-	) {
-		if (
-			seriesHint.index ===
-			book.seriesIndex
-		) {
-			score += 25;
-		} else {
-			/*
-			 * Correct-looking series but
-			 * wrong volume must lose.
-			 */
-			score -= 60;
-		}
-	}
-
-	/*
-	 * REAL TITLE
-	 *
-	 * Useful for ordinary filenames.
-	 *
-	 * For series-based filenames this may
-	 * legitimately be near zero.
-	 */
-	if (
-		query.title &&
-		book.title
-	) {
-		score +=
-			wordSimilarity(
-				query.title,
-				book.title,
-			) * 30;
-	}
-
-	return Math.max(
-		0,
-		Math.min(
-			100,
-			Math.round(score),
-		),
+	return Math.round(
+		clamp(score),
 	);
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Provider                                                                  */
-/* -------------------------------------------------------------------------- */
-
 export async function lookupLectulandia(
-	query: FilenameMetadata,
+	hypothesis:
+		SearchHypothesis,
 	baseUrl =
 		DEFAULT_BASE_URL,
 ): Promise<
 	MetadataCandidate | undefined
 > {
 	if (
-		!query.title &&
-		!query.author
+		hypothesis.kind ===
+		"isbn"
+	) {
+		return undefined;
+	}
+
+	const hints =
+		hypothesis.hints;
+
+	if (
+		!hints.title &&
+		!hints.series &&
+		!hints.author
 	) {
 		return undefined;
 	}
@@ -755,67 +613,45 @@ export async function lookupLectulandia(
 			"",
 		);
 
-	const seriesHint =
-		extractSeriesHint(
-			query.title,
-		);
-
 	console.log(
 		"[Lectulandia] query:",
 		JSON.stringify({
-			title:
-				query.title,
-
-			author:
-				query.author,
-
-			seriesHint,
+			origin:
+				hypothesis.origin,
+			...hints,
 		}),
 	);
 
 	const candidateUrls =
 		await discoverCandidateUrls(
-			query,
+			hypothesis,
 			normalizedBase,
-			seriesHint,
 		);
-
-	console.log(
-		"[Lectulandia] candidate URLs:",
-		candidateUrls.length,
-	);
 
 	if (!candidateUrls.length) {
 		return undefined;
 	}
 
-	/*
-	 * Avoid hammering the site.
-	 *
-	 * This is a personal library tool,
-	 * so checking a modest number of
-	 * candidate books is sufficient.
-	 */
-	const urls =
-		candidateUrls.slice(
-			0,
-			25,
-		);
-
 	const candidates:
 		Array<{
 			book:
 				ParsedLectulandiaBook;
-
 			score:
 				number;
 		}> = [];
 
 	/*
-	 * Process in small batches instead of
-	 * firing 25 requests simultaneously.
+	 * Avoid an unbounded crawl of an
+	 * author's catalogue.
 	 */
-	const batchSize = 4;
+	const urls =
+		candidateUrls.slice(
+			0,
+			30,
+		);
+
+	const batchSize =
+		4;
 
 	for (
 		let offset = 0;
@@ -852,31 +688,9 @@ export async function lookupLectulandia(
 
 						const score =
 							scoreCandidate(
+								hypothesis,
 								book,
-								query,
-								seriesHint,
 							);
-
-						console.log(
-							"[Lectulandia] candidate:",
-							JSON.stringify({
-								title:
-									book.title,
-
-								author:
-									book.author,
-
-								series:
-									book.series,
-
-								seriesIndex:
-									book.seriesIndex,
-
-								score,
-
-								url,
-							}),
-						);
 
 						return {
 							book,
@@ -909,67 +723,55 @@ export async function lookupLectulandia(
 	}
 
 	/*
-	 * For series filenames:
-	 *
-	 * author ~30
-	 * series ~45
-	 * exact volume +25
-	 *
-	 * → essentially 100 without needing
-	 * title similarity.
+	 * Additional hard guards.
 	 */
-	const minimumScore =
-		seriesHint.name &&
-		seriesHint.index
-			? 80
-			: 60;
-
 	if (
-		best.score <
-		minimumScore
+		hypothesis.kind ===
+			"series"
 	) {
-		console.log(
-			"[Lectulandia] best candidate below threshold:",
-			best.score,
-		);
-
-		return undefined;
+		if (
+			!hints.series ||
+			!hints.seriesIndex ||
+			!best.book.series ||
+			!best.book.seriesIndex ||
+			titleSimilarity(
+				hints.series,
+				best.book.series,
+			) < 0.7 ||
+			!sameSeriesIndex(
+				hints.seriesIndex,
+				best.book
+					.seriesIndex,
+			)
+		) {
+			return undefined;
+		}
 	}
 
-	const metadata = {
-		title:
-			best.book.title,
-
-		author:
+	if (
+		hints.author &&
+		best.book.author &&
+		authorSimilarity(
+			hints.author,
 			best.book.author,
-
-		description:
-			best.book.description,
-
-		series:
-			best.book.series,
-
-		seriesIndex:
-			best.book
-				.seriesIndex,
-
-		subjects:
-			best.book.subjects,
-	};
+		) < 0.55
+	) {
+		return undefined;
+	}
 
 	console.log(
 		"[Lectulandia] MATCH:",
 		JSON.stringify({
-			...metadata,
-
-			description:
-				metadata.description
-					? `${metadata.description.slice(0, 80)}...`
-					: undefined,
-
+			title:
+				best.book.title,
+			author:
+				best.book.author,
+			series:
+				best.book.series,
+			seriesIndex:
+				best.book.seriesIndex,
 			score:
 				best.score,
-
 			url:
 				best.book.url,
 		}),
@@ -979,12 +781,31 @@ export async function lookupLectulandia(
 		source:
 			"lectulandia",
 
-		metadata,
+		metadata: {
+			title:
+				best.book.title,
+			author:
+				best.book.author,
+			description:
+				best.book
+					.description,
+			series:
+				best.book.series,
+			seriesIndex:
+				best.book
+					.seriesIndex,
+			subjects:
+				best.book
+					.subjects,
+		},
 
 		score:
 			best.score,
 
 		url:
 			best.book.url,
+
+		matchedHypothesis:
+			hypothesis,
 	};
 }

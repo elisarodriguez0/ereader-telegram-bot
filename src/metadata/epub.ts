@@ -3,13 +3,12 @@ import {
 	strToU8,
 	unzipSync,
 	zipSync,
-	type Zippable,
 } from "fflate";
 
 import {
 	cleanText,
-	isMeaningful,
 	normalizeIsbn,
+	normalizePublicationDate,
 } from "./normalize";
 
 import {
@@ -22,25 +21,41 @@ import type {
 	ResolvedMetadata,
 } from "./types";
 
-export interface RepairedEpub {
+export interface EpubRepairResult {
 	bytes: Uint8Array;
-
-	resolved:
-		ResolvedMetadata;
+	originalMetadata: BookMetadata;
+	resolved: ResolvedMetadata;
+	opfPath: string;
 }
 
-function decodeXml(
+function decodeXmlEntities(
 	value: string,
 ): string {
 	return value
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&apos;/g, "'");
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;/gi, '"')
+		.replace(/&apos;/gi, "'")
+		.replace(/&#39;/gi, "'")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">");
 }
 
-function encodeXml(
+function stripXml(
+	value?: string,
+): string | undefined {
+	if (!value) {
+		return undefined;
+	}
+
+	return cleanText(
+		decodeXmlEntities(
+			value.replace(/<[^>]+>/g, " "),
+		),
+	);
+}
+
+function escapeXml(
 	value: string,
 ): string {
 	return value
@@ -52,86 +67,67 @@ function encodeXml(
 }
 
 function findOpfPath(
-	files:
-		Record<string, Uint8Array>,
+	files: Record<string, Uint8Array>,
 ): string {
 	const container =
-		files[
-			"META-INF/container.xml"
-		];
+		files["META-INF/container.xml"];
 
-	if (!container) {
+	if (container) {
+		const xml = strFromU8(container);
+		const match = xml.match(
+			/<rootfile\b[^>]*\bfull-path=["']([^"']+)["'][^>]*>/i,
+		);
+
+		if (
+			match?.[1] &&
+			files[match[1]]
+		) {
+			return match[1];
+		}
+	}
+
+	const fallback = Object.keys(files)
+		.find((name) =>
+			name.toLowerCase().endsWith(".opf"),
+		);
+
+	if (!fallback) {
 		throw new Error(
-			"Invalid EPUB: META-INF/container.xml is missing",
+			"Could not locate the EPUB OPF package document",
 		);
 	}
 
-	const xml =
-		strFromU8(container);
-
-	const match =
-		xml.match(
-			/<rootfile\b[^>]*full-path=["']([^"']+)["']/i,
-		);
-
-	if (!match?.[1]) {
-		throw new Error(
-			"Invalid EPUB: package document not found",
-		);
-	}
-
-	const path =
-		decodeXml(match[1]);
-
-	if (!files[path]) {
-		throw new Error(
-			`Invalid EPUB: ${path} is missing`,
-		);
-	}
-
-	return path;
+	return fallback;
 }
 
 function extractElement(
 	xml: string,
-	tag: string,
+	localName: string,
 ): string | undefined {
-	const match =
-		xml.match(
-			new RegExp(
-				`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,
-				"i",
-			),
-		);
+	const pattern = new RegExp(
+		`<(?:[\\w.-]+:)?${localName}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w.-]+:)?${localName}>`,
+		"i",
+	);
 
-	return cleanText(
-		match?.[1],
+	return stripXml(
+		pattern.exec(xml)?.[1],
 	);
 }
 
 function extractAllElements(
 	xml: string,
-	tag: string,
+	localName: string,
 ): string[] {
-	const values:
-		string[] = [];
+	const pattern = new RegExp(
+		`<(?:[\\w.-]+:)?${localName}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w.-]+:)?${localName}>`,
+		"gi",
+	);
 
-	const regex =
-		new RegExp(
-			`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,
-			"gi",
-		);
+	const values: string[] = [];
+	let match: RegExpExecArray | null;
 
-	let match:
-		| RegExpExecArray
-		| null;
-
-	while (
-		(match = regex.exec(xml))
-	) {
-		const value =
-			cleanText(match[1]);
-
+	while ((match = pattern.exec(xml))) {
+		const value = stripXml(match[1]);
 		if (value) {
 			values.push(value);
 		}
@@ -140,564 +136,520 @@ function extractAllElements(
 	return values;
 }
 
-function extractMetaContent(
+function extractMetaContentByName(
 	xml: string,
 	name: string,
 ): string | undefined {
-	const escaped =
-		name.replace(
-			/[.*+?^${}()|[\]\\]/g,
-			"\\$&",
+	const tags = xml.match(/<meta\b[^>]*>/gi) ?? [];
+
+	for (const tag of tags) {
+		const nameMatch = tag.match(
+			/\bname=["']([^"']+)["']/i,
 		);
 
-	const patterns = [
-		new RegExp(
-			`<meta\\b[^>]*name=["']${escaped}["'][^>]*content=["']([^"']*)["'][^>]*\\/?>`,
-			"i",
-		),
-
-		new RegExp(
-			`<meta\\b[^>]*content=["']([^"']*)["'][^>]*name=["']${escaped}["'][^>]*\\/?>`,
-			"i",
-		),
-	];
-
-	for (const pattern of patterns) {
-		const match =
-			xml.match(pattern);
-
-		if (match?.[1]) {
-			return cleanText(
-				match[1],
-			);
-		}
-	}
-
-	return undefined;
-}
-
-function extractEpub3Series(
-	xml: string,
-): {
-	series?: string;
-	index?: string;
-} {
-	const collection =
-		xml.match(
-			/<meta\b(?=[^>]*property=["']belongs-to-collection["'])(?=[^>]*id=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/meta>/i,
-		);
-
-	if (!collection) {
-		return {};
-	}
-
-	const id =
-		collection[1];
-
-	const series =
-		cleanText(
-			collection[2],
-		);
-
-	if (!series) {
-		return {};
-	}
-
-	const escaped =
-		id.replace(
-			/[.*+?^${}()|[\]\\]/g,
-			"\\$&",
-		);
-
-	const position =
-		xml.match(
-			new RegExp(
-				`<meta\\b(?=[^>]*refines=["']#${escaped}["'])(?=[^>]*property=["']group-position["'])[^>]*>([\\s\\S]*?)<\\/meta>`,
-				"i",
-			),
-		);
-
-	return {
-		series,
-
-		index:
-			cleanText(
-				position?.[1],
-			),
-	};
-}
-
-function findIsbn(
-	xml: string,
-): string | undefined {
-	for (
-		const identifier
-		of extractAllElements(
-			xml,
-			"dc:identifier",
-		)
-	) {
-		const isbn =
-			normalizeIsbn(
-				identifier,
-			);
-
-		if (isbn) {
-			return isbn;
-		}
-	}
-
-	return undefined;
-}
-
-function readExistingMetadata(
-	opf: string,
-): BookMetadata {
-	const epub3Series =
-		extractEpub3Series(opf);
-
-	return {
-		title:
-			extractElement(
-				opf,
-				"dc:title",
-			),
-
-		author:
-			extractElement(
-				opf,
-				"dc:creator",
-			),
-
-		description:
-			extractElement(
-				opf,
-				"dc:description",
-			),
-
-		language:
-			extractElement(
-				opf,
-				"dc:language",
-			),
-
-		isbn:
-			findIsbn(opf),
-
-		publisher:
-			extractElement(
-				opf,
-				"dc:publisher",
-			),
-
-		published:
-			extractElement(
-				opf,
-				"dc:date",
-			),
-
-		series:
-			epub3Series.series ??
-			extractMetaContent(
-				opf,
-				"calibre:series",
-			),
-
-		seriesIndex:
-			epub3Series.index ??
-			extractMetaContent(
-				opf,
-				"calibre:series_index",
-			),
-
-		subjects:
-			extractAllElements(
-				opf,
-				"dc:subject",
-			),
-	};
-}
-
-function insertMetadata(
-	opf: string,
-	xml: string,
-): string {
-	const index =
-		opf.search(
-			/<\/metadata\s*>/i,
-		);
-
-	if (index === -1) {
-		throw new Error(
-			"EPUB OPF metadata section is missing",
-		);
-	}
-
-	return (
-		opf.slice(0, index) +
-		"\n" +
-		xml +
-		"\n" +
-		opf.slice(index)
-	);
-}
-
-function setElement(
-	opf: string,
-	tag: string,
-	value?: string,
-): string {
-	if (!value) {
-		return opf;
-	}
-
-	const regex =
-		new RegExp(
-			`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,
-			"i",
-		);
-
-	const xml =
-		`<${tag}>${encodeXml(value)}</${tag}>`;
-
-	if (regex.test(opf)) {
-		return opf.replace(
-			regex,
-			xml,
-		);
-	}
-
-	return insertMetadata(
-		opf,
-		xml,
-	);
-}
-
-function removeElements(
-	opf: string,
-	tag: string,
-): string {
-	return opf.replace(
-		new RegExp(
-			`\\s*<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`,
-			"gi",
-		),
-		"",
-	);
-}
-
-function removeCalibreSeries(
-	opf: string,
-): string {
-	return opf
-		.replace(
-			/\s*<meta\b[^>]*name=["']calibre:series["'][^>]*\/?>/gi,
-			"",
-		)
-		.replace(
-			/\s*<meta\b[^>]*name=["']calibre:series_index["'][^>]*\/?>/gi,
-			"",
-		);
-}
-
-function setSubjects(
-	opf: string,
-	subjects?: string[],
-): string {
-	if (!subjects?.length) {
-		return opf;
-	}
-
-	let result =
-		removeElements(
-			opf,
-			"dc:subject",
-		);
-
-	const xml =
-		subjects
-			.slice(0, 12)
-			.map(
-				(subject) =>
-					`<dc:subject>${encodeXml(subject)}</dc:subject>`,
-			)
-			.join("\n");
-
-	return insertMetadata(
-		result,
-		xml,
-	);
-}
-
-function setSeries(
-	opf: string,
-	series?: string,
-	index?: string,
-): string {
-	if (!series) {
-		return opf;
-	}
-
-	let result =
-		removeCalibreSeries(
-			opf,
-		);
-
-	const lines = [
-		`<meta name="calibre:series" content="${encodeXml(series)}" />`,
-	];
-
-	if (index) {
-		lines.push(
-			`<meta name="calibre:series_index" content="${encodeXml(index)}" />`,
-		);
-	}
-
-	return insertMetadata(
-		result,
-		lines.join("\n"),
-	);
-}
-
-function setIsbn(
-	opf: string,
-	isbn?: string,
-): string {
-	if (!isbn) {
-		return opf;
-	}
-
-	if (
-		findIsbn(opf) === isbn
-	) {
-		return opf;
-	}
-
-	return insertMetadata(
-		opf,
-		`<dc:identifier id="ereader-sync-isbn">${encodeXml(isbn)}</dc:identifier>`,
-	);
-}
-
-function setPageCount(
-	opf: string,
-	pageCount?: number,
-): string {
-	if (!pageCount) {
-		return opf;
-	}
-
-	let result =
-		opf.replace(
-			/\s*<meta\b[^>]*name=["']ereader-sync:page_count["'][^>]*\/?>/gi,
-			"",
-		);
-
-	return insertMetadata(
-		result,
-		`<meta name="ereader-sync:page_count" content="${pageCount}" />`,
-	);
-}
-
-function rewriteMetadata(
-	opf: string,
-	metadata: BookMetadata,
-): string {
-	let result = opf;
-
-	if (
-		isMeaningful(
-			metadata.title,
-		)
-	) {
-		result =
-			setElement(
-				result,
-				"dc:title",
-				metadata.title,
-			);
-	}
-
-	if (
-		isMeaningful(
-			metadata.author,
-		)
-	) {
-		result =
-			setElement(
-				result,
-				"dc:creator",
-				metadata.author,
-			);
-	}
-
-	if (metadata.description) {
-		result =
-			setElement(
-				result,
-				"dc:description",
-				metadata.description,
-			);
-	}
-
-	if (metadata.language) {
-		result =
-			setElement(
-				result,
-				"dc:language",
-				metadata.language,
-			);
-	}
-
-	if (metadata.publisher) {
-		result =
-			setElement(
-				result,
-				"dc:publisher",
-				metadata.publisher,
-			);
-	}
-
-	if (metadata.published) {
-		result =
-			setElement(
-				result,
-				"dc:date",
-				metadata.published,
-			);
-	}
-
-	result =
-		setIsbn(
-			result,
-			metadata.isbn,
-		);
-
-	result =
-		setSeries(
-			result,
-			metadata.series,
-			metadata.seriesIndex,
-		);
-
-	result =
-		setSubjects(
-			result,
-			metadata.subjects,
-		);
-
-	result =
-		setPageCount(
-			result,
-			metadata.pageCount,
-		);
-
-	return result;
-}
-
-function rebuildEpub(
-	files:
-		Record<string, Uint8Array>,
-): Uint8Array {
-	const output:
-		Zippable = {};
-
-	/*
-	 * EPUB requirement:
-	 * mimetype first and uncompressed.
-	 */
-	output.mimetype = [
-		strToU8(
-			"application/epub+zip",
-		),
-		{
-			level: 0,
-		},
-	];
-
-	for (
-		const [name, bytes]
-		of Object.entries(files)
-	) {
 		if (
-			name === "mimetype"
+			nameMatch?.[1]?.toLowerCase() !==
+			name.toLowerCase()
 		) {
 			continue;
 		}
 
-		output[name] = [
-			bytes,
-			{
-				level: 6,
-			},
-		];
+		const content = tag.match(
+			/\bcontent=["']([^"']*)["']/i,
+		)?.[1];
+
+		return content
+			? decodeXmlEntities(content).trim()
+			: undefined;
 	}
 
-	return zipSync(output);
+	return undefined;
+}
+
+function extractPropertyMeta(
+	xml: string,
+	property: string,
+): string | undefined {
+	const pattern = new RegExp(
+		`<meta\\b(?=[^>]*\\bproperty=["']${property.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}["'])[^>]*>([\\s\\S]*?)<\\/meta>`,
+		"i",
+	);
+
+	return stripXml(
+		pattern.exec(xml)?.[1],
+	);
+}
+
+function extractSeries(
+	opf: string,
+): {
+	series?: string;
+	seriesIndex?: string;
+} {
+	const calibreSeries =
+		extractMetaContentByName(
+			opf,
+			"calibre:series",
+		);
+
+	const calibreIndex =
+		extractMetaContentByName(
+			opf,
+			"calibre:series_index",
+		);
+
+	if (calibreSeries) {
+		return {
+			series: cleanText(calibreSeries),
+			seriesIndex:
+				cleanText(calibreIndex),
+		};
+	}
+
+	const epubSeries =
+		extractPropertyMeta(
+			opf,
+			"belongs-to-collection",
+		);
+
+	let epubIndex: string | undefined;
+
+	const groupPosition = opf.match(
+		/<meta\b(?=[^>]*\bproperty=["']group-position["'])[^>]*>([\s\S]*?)<\/meta>/i,
+	)?.[1];
+
+	if (groupPosition) {
+		epubIndex = stripXml(groupPosition);
+	}
+
+	return {
+		series: epubSeries,
+		seriesIndex: epubIndex,
+	};
+}
+
+export function readEpubMetadata(
+	bytes: Uint8Array,
+): {
+	metadata: BookMetadata;
+	opfPath: string;
+} {
+	const files = unzipSync(bytes);
+	const opfPath = findOpfPath(files);
+	const opf = strFromU8(files[opfPath]);
+
+	const identifiers =
+		extractAllElements(
+			opf,
+			"identifier",
+		);
+
+	const isbn = identifiers
+		.map((value) => normalizeIsbn(value))
+		.find((value): value is string => !!value);
+
+	const series = extractSeries(opf);
+
+	const pageCountRaw =
+		extractMetaContentByName(
+			opf,
+			"ereader-sync:page_count",
+		);
+
+	const pageCountNumber =
+		pageCountRaw
+			? Number(pageCountRaw)
+			: undefined;
+
+	return {
+		opfPath,
+		metadata: {
+			title: extractElement(opf, "title"),
+			author: extractElement(opf, "creator"),
+			description:
+				extractElement(opf, "description"),
+			language:
+				extractElement(opf, "language"),
+			isbn,
+			publisher:
+				extractElement(opf, "publisher"),
+			published:
+				normalizePublicationDate(
+					extractElement(opf, "date"),
+				),
+			pageCount:
+				pageCountNumber &&
+				Number.isFinite(pageCountNumber) &&
+				pageCountNumber > 0
+					? pageCountNumber
+					: undefined,
+			series: series.series,
+			seriesIndex:
+				series.seriesIndex,
+			subjects:
+				extractAllElements(
+					opf,
+					"subject",
+				),
+		},
+	};
+}
+
+function insertIntoMetadata(
+	xml: string,
+	fragment: string,
+): string {
+	const close = xml.search(
+		/<\/(?:[\w.-]+:)?metadata\s*>/i,
+	);
+
+	if (close < 0) {
+		throw new Error(
+			"EPUB OPF does not contain a metadata section",
+		);
+	}
+
+	return (
+		xml.slice(0, close) +
+		"\n    " +
+		fragment +
+		"\n" +
+		xml.slice(close)
+	);
+}
+
+function setElement(
+	xml: string,
+	localName: string,
+	value?: string,
+): string {
+	if (!value) {
+		return xml;
+	}
+
+	const escaped = escapeXml(value);
+	const pattern = new RegExp(
+		`<((?:[\\w.-]+:)?${localName})\\b([^>]*)>[\\s\\S]*?<\\/\\1>`,
+		"i",
+	);
+
+	if (pattern.test(xml)) {
+		return xml.replace(
+			pattern,
+			(_full, tagName: string, attrs: string) =>
+				`<${tagName}${attrs}>${escaped}</${tagName}>`,
+		);
+	}
+
+	return insertIntoMetadata(
+		xml,
+		`<dc:${localName}>${escaped}</dc:${localName}>`,
+	);
+}
+
+function setNamedMeta(
+	xml: string,
+	name: string,
+	value?: string,
+): string {
+	if (!value) {
+		return xml;
+	}
+
+	const escapedName = name.replace(
+		/[.*+?^${}()|[\]\\]/g,
+		"\\$&",
+	);
+	const pattern = new RegExp(
+		`<meta\\b(?=[^>]*\\bname=["']${escapedName}["'])[^>]*(?:\\/?>)`,
+		"i",
+	);
+
+	const replacement =
+		`<meta name="${escapeXml(name)}" content="${escapeXml(value)}" />`;
+
+	if (pattern.test(xml)) {
+		return xml.replace(
+			pattern,
+			replacement,
+		);
+	}
+
+	return insertIntoMetadata(
+		xml,
+		replacement,
+	);
+}
+
+function setIsbn(
+	xml: string,
+	isbn?: string,
+): string {
+	const normalized = normalizeIsbn(isbn);
+
+	if (!normalized) {
+		return xml;
+	}
+
+	const pattern = /<((?:[\w.-]+:)?identifier)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+	let match: RegExpExecArray | null;
+
+	while ((match = pattern.exec(xml))) {
+		if (!normalizeIsbn(stripXml(match[3]))) {
+			continue;
+		}
+
+		const replacement =
+			`<${match[1]}${match[2]}>urn:isbn:${normalized}</${match[1]}>`;
+
+		return (
+			xml.slice(0, match.index) +
+			replacement +
+			xml.slice(match.index + match[0].length)
+		);
+	}
+
+	return insertIntoMetadata(
+		xml,
+		`<dc:identifier id="ereader-sync-isbn">urn:isbn:${normalized}</dc:identifier>`,
+	);
+}
+
+function setSubjects(
+	xml: string,
+	subjects?: string[],
+): string {
+	const cleanSubjects = (subjects ?? [])
+		.map((value) => cleanText(value))
+		.filter((value): value is string => !!value)
+		.filter(
+			(value, index, array) =>
+				array.findIndex(
+					(other) =>
+						other.toLowerCase() ===
+						value.toLowerCase(),
+				) === index,
+		);
+
+	if (cleanSubjects.length === 0) {
+		return xml;
+	}
+
+	let output = xml.replace(
+		/<(?:[\w.-]+:)?subject\b[^>]*>[\s\S]*?<\/(?:[\w.-]+:)?subject\s*>/gi,
+		"",
+	);
+
+	for (const subject of cleanSubjects) {
+		output = insertIntoMetadata(
+			output,
+			`<dc:subject>${escapeXml(subject)}</dc:subject>`,
+		);
+	}
+
+	return output;
+}
+
+function setEpub3SeriesMetadata(
+	xml: string,
+	series?: string,
+	seriesIndex?: string,
+): string {
+	if (!series) {
+		return xml;
+	}
+
+	let output = xml
+		.replace(
+			/<meta\b[^>]*\bid=["']ereader-sync-series["'][^>]*>[\s\S]*?<\/meta>/gi,
+			"",
+		)
+		.replace(
+			/<meta\b(?=[^>]*\brefines=["']#ereader-sync-series["'])[^>]*>[\s\S]*?<\/meta>/gi,
+			"",
+		);
+
+	output = insertIntoMetadata(
+		output,
+		`<meta property="belongs-to-collection" id="ereader-sync-series">${escapeXml(series)}</meta>`,
+	);
+
+	output = insertIntoMetadata(
+		output,
+		`<meta refines="#ereader-sync-series" property="collection-type">series</meta>`,
+	);
+
+	if (seriesIndex) {
+		output = insertIntoMetadata(
+			output,
+			`<meta refines="#ereader-sync-series" property="group-position">${escapeXml(seriesIndex)}</meta>`,
+		);
+	}
+
+	return output;
+}
+
+function rewriteOpf(
+	opf: string,
+	metadata: BookMetadata,
+): string {
+	let output = opf;
+
+	output = setElement(
+		output,
+		"title",
+		metadata.title,
+	);
+	output = setElement(
+		output,
+		"creator",
+		metadata.author,
+	);
+	output = setElement(
+		output,
+		"description",
+		metadata.description,
+	);
+	output = setElement(
+		output,
+		"language",
+		metadata.language,
+	);
+	output = setElement(
+		output,
+		"publisher",
+		metadata.publisher,
+	);
+	output = setElement(
+		output,
+		"date",
+		normalizePublicationDate(
+			metadata.published,
+		),
+	);
+	output = setIsbn(
+		output,
+		metadata.isbn,
+	);
+	output = setSubjects(
+		output,
+		metadata.subjects,
+	);
+
+	if (metadata.series) {
+		output = setNamedMeta(
+			output,
+			"calibre:series",
+			metadata.series,
+		);
+		output = setNamedMeta(
+			output,
+			"calibre:series_index",
+			metadata.seriesIndex ?? "1",
+		);
+		output = setEpub3SeriesMetadata(
+			output,
+			metadata.series,
+			metadata.seriesIndex,
+		);
+	}
+
+	if (
+		metadata.pageCount &&
+		metadata.pageCount > 0
+	) {
+		output = setNamedMeta(
+			output,
+			"ereader-sync:page_count",
+			String(metadata.pageCount),
+		);
+	}
+
+	return output;
+}
+
+function rebuildEpub(
+	files: Record<string, Uint8Array>,
+	opfPath: string,
+	opf: string,
+): Uint8Array {
+	const ordered: Record<
+		string,
+		Uint8Array | [Uint8Array, { level: number }]
+	> = {};
+
+	const mimetype =
+		files.mimetype ??
+		strToU8("application/epub+zip");
+
+	/*
+	 * EPUB requires mimetype to be the first ZIP entry and to
+	 * be stored without compression.
+	 */
+	ordered.mimetype = [
+		mimetype,
+		{ level: 0 },
+	];
+
+	for (const [name, bytes] of Object.entries(files)) {
+		if (name === "mimetype") {
+			continue;
+		}
+
+		ordered[name] =
+			name === opfPath
+				? strToU8(opf)
+				: bytes;
+	}
+
+	return zipSync(
+		ordered,
+		{ level: 6 },
+	);
 }
 
 export async function repairEpub(
 	originalBytes: Uint8Array,
 	originalFileName: string,
-	options:
-		MetadataResolverOptions,
-): Promise<RepairedEpub> {
-	let files:
-		Record<
-			string,
-			Uint8Array
-		>;
+	options: MetadataResolverOptions = {},
+): Promise<EpubRepairResult> {
+	const files = unzipSync(originalBytes);
+	const opfPath = findOpfPath(files);
+	const opf = strFromU8(files[opfPath]);
 
-	try {
-		files =
-			unzipSync(
-				originalBytes,
-			);
-	} catch {
-		throw new Error(
-			"The uploaded file is not a valid EPUB",
-		);
-	}
+	const {
+		metadata: originalMetadata,
+	} = readEpubMetadata(
+		originalBytes,
+	);
 
-	const opfPath =
-		findOpfPath(
-			files,
-		);
+	const resolved = await resolveMetadata(
+		originalMetadata,
+		originalFileName,
+		options,
+	);
 
-	const originalOpf =
-		strFromU8(
-			files[opfPath],
-		);
+	const rewrittenOpf = rewriteOpf(
+		opf,
+		resolved.metadata,
+	);
 
-	const existing =
-		readExistingMetadata(
-			originalOpf,
-		);
+	const bytes = rebuildEpub(
+		files,
+		opfPath,
+		rewrittenOpf,
+	);
 
-	const resolved =
-		await resolveMetadata(
-			existing,
-			originalFileName,
-			options,
-		);
-
-	const rewritten =
-		rewriteMetadata(
-			originalOpf,
-			resolved.metadata,
-		);
-
-	files[opfPath] =
-		strToU8(
-			rewritten,
-		);
+	/*
+	 * Parse the output once before returning. If the rewritten
+	 * EPUB is malformed, fail before it ever reaches R2.
+	 */
+	readEpubMetadata(bytes);
 
 	return {
-		bytes:
-			rebuildEpub(
-				files,
-			),
-
+		bytes,
+		originalMetadata,
 		resolved,
+		opfPath,
 	};
 }
