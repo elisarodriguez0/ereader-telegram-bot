@@ -263,135 +263,6 @@ async function askWallpaperDestination(
 	}
 }
 
-async function saveEpubToR2(
-	env: Env,
-	document: TelegramDocument,
-): Promise<string> {
-	const filePath = await getTelegramFilePath(
-		env.TELEGRAM_BOT_TOKEN,
-		document.file_id,
-	);
-
-	const downloadResponse =
-		await downloadTelegramFile(
-			env.TELEGRAM_BOT_TOKEN,
-			filePath,
-		);
-
-	const originalFileName =
-		document.file_name ??
-		`${document.file_unique_id}.epub`;
-
-	const safeFileName =
-		sanitizeFileName(
-			originalFileName,
-		);
-
-	const originalBytes =
-		new Uint8Array(
-			await downloadResponse.arrayBuffer(),
-		);
-
-	const {
-		repairEpubMetadata,
-	} = await import(
-		"./epub-metadata"
-	);
-
-	const repaired =
-		await repairEpubMetadata(
-			originalBytes,
-			originalFileName,
-		);
-
-	const r2Key =
-		`books/${safeFileName}`;
-
-	const customMetadata: Record<string, string> = {
-		telegramFileId:
-			document.file_id,
-
-		telegramFileUniqueId:
-			document.file_unique_id,
-
-		originalFileName,
-
-		metadataRepaired:
-			repaired.repairedFields.length > 0
-				? "true"
-				: "false",
-
-		repairedFields:
-			repaired.repairedFields.join(","),
-
-		metadataWarnings:
-			repaired.warnings.join(" | "),
-	};
-
-	if (repaired.metadata.title) {
-		customMetadata.title =
-			repaired.metadata.title;
-	}
-
-	if (repaired.metadata.author) {
-		customMetadata.author =
-			repaired.metadata.author;
-	}
-
-	if (repaired.metadata.description) {
-		customMetadata.description =
-			repaired.metadata.description.slice(
-				0,
-				1024,
-			);
-	}
-
-	if (repaired.metadata.language) {
-		customMetadata.language =
-			repaired.metadata.language;
-	}
-
-	if (repaired.metadata.isbn) {
-		customMetadata.isbn =
-			repaired.metadata.isbn;
-	}
-
-	if (repaired.metadata.publisher) {
-		customMetadata.publisher =
-			repaired.metadata.publisher;
-	}
-
-	if (repaired.metadata.published) {
-		customMetadata.published =
-			repaired.metadata.published;
-	}
-
-	if (repaired.metadata.series) {
-		customMetadata.series =
-			repaired.metadata.series;
-	}
-
-	if (repaired.metadata.seriesIndex) {
-		customMetadata.seriesIndex =
-			repaired.metadata.seriesIndex;
-	}
-
-	await env.EREADER_BUCKET.put(
-		r2Key,
-		repaired.bytes,
-		{
-			httpMetadata: {
-				contentType:
-					"application/epub+zip",
-			},
-
-			customMetadata,
-		},
-	);
-
-	return r2Key;
-}
-
 async function getNextWallpaperName(
 	env: Env,
 	extension: string,
@@ -1164,7 +1035,8 @@ export default {
 				if (isEpub(document)) {
 					if (
 						document.file_size &&
-						document.file_size > 20 * 1024 * 1024
+						document.file_size >
+							20 * 1024 * 1024
 					) {
 						await sendTelegramMessage(
 							env.TELEGRAM_BOT_TOKEN,
@@ -1185,32 +1057,177 @@ export default {
 						await sendTelegramMessage(
 							env.TELEGRAM_BOT_TOKEN,
 							chatId,
-							`☁️ Guardando ${document.file_name ?? "EPUB"}...`,
+							`☁️ Preparando ${document.file_name ?? "EPUB"}...`,
 						);
 
-						const r2Key = await saveEpubToR2(
-							env,
-							document,
+						const {
+							processEpubUpload,
+						} = await import(
+							"./epub-service"
+						);
+
+						const metadataEnv =
+							env as unknown as {
+								GOOGLE_BOOKS_API_KEY?:
+									string;
+
+								LECTULANDIA_BASE_URL?:
+									string;
+							};
+
+						const result =
+							await processEpubUpload({
+								telegramToken:
+									env.TELEGRAM_BOT_TOKEN,
+
+								bucket:
+									env.EREADER_BUCKET,
+
+								document,
+
+								googleBooksApiKey:
+									metadataEnv
+										.GOOGLE_BOOKS_API_KEY,
+
+								lectulandiaBaseUrl:
+									metadataEnv
+										.LECTULANDIA_BASE_URL,
+							});
+
+						const metadata =
+							result.metadata;
+
+						const info: string[] = [
+							"📚 EPUB preparado",
+							"",
+							metadata.title ??
+								document.file_name ??
+								"Sin título",
+						];
+
+						if (metadata.author) {
+							info.push(
+								metadata.author,
+							);
+						}
+
+						info.push("");
+
+						if (metadata.series) {
+							info.push(
+								`📖 Serie: ${metadata.series}${
+									metadata.seriesIndex
+										? ` #${metadata.seriesIndex}`
+										: ""
+								}`,
+							);
+						}
+
+						const details:
+							string[] = [];
+
+						if (metadata.published) {
+							details.push(
+								metadata.published,
+							);
+						}
+
+						if (metadata.pageCount) {
+							details.push(
+								`${metadata.pageCount} páginas`,
+							);
+						}
+
+						if (details.length) {
+							info.push(
+								`📅 ${details.join(" · ")}`,
+							);
+						}
+
+						if (
+							metadata.subjects?.length
+						) {
+							info.push(
+								`🏷️ ${metadata.subjects.join(" · ")}`,
+							);
+						}
+
+						if (metadata.isbn) {
+							info.push(
+								`ISBN: ${metadata.isbn}`,
+							);
+						}
+
+						if (metadata.publisher) {
+							info.push(
+								`Editorial: ${metadata.publisher}`,
+							);
+						}
+
+						if (
+							result.repairedFields
+								.length
+						) {
+							info.push(
+								"",
+								`🔧 Actualizado: ${result.repairedFields.join(", ")}`,
+							);
+						}
+
+						const successfulMatches =
+							result.matches
+								.filter(
+									(match) =>
+										match.score >= 65,
+								)
+								.map(
+									(match) =>
+										`${match.source} (${match.score}%)`,
+								);
+
+						if (
+							successfulMatches.length
+						) {
+							info.push(
+								`🔎 Fuentes: ${successfulMatches.join(", ")}`,
+							);
+						}
+
+						const importantWarnings =
+							result.warnings.filter(
+								(warning) =>
+									!warning.startsWith(
+										"Lectulandia unavailable",
+									) ||
+									!result.matches.some(
+										(match) =>
+											match.score >=
+											65,
+									),
+							);
+
+						if (
+							importantWarnings.length
+						) {
+							info.push(
+								"",
+								"⚠️ " +
+									importantWarnings
+										.join("\n⚠️ "),
+							);
+						}
+
+						info.push(
+							"",
+							`☁️ ${result.r2Key}`,
+							"",
+							"✅ Listo para sincronizar.",
 						);
 
 						await sendTelegramMessage(
 							env.TELEGRAM_BOT_TOKEN,
 							chatId,
-							[
-								"📚 EPUB guardado",
-								"",
-								`Archivo: ${
-									document.file_name ??
-									"Sin nombre"
-								}`,
-								`Tamaño: ${formatBytes(
-									document.file_size,
-								)}`,
-								"",
-								`☁️ ${r2Key}`,
-								"",
-								"✅ Ya está en tu biblioteca.",
-							].join("\n"),
+							info.join("\n"),
 						);
 					} catch (error) {
 						console.error(error);
@@ -1219,7 +1236,7 @@ export default {
 							env.TELEGRAM_BOT_TOKEN,
 							chatId,
 							[
-								"❌ No he podido guardar el EPUB.",
+								"❌ No he podido preparar el EPUB.",
 								"",
 								error instanceof Error
 									? error.message
