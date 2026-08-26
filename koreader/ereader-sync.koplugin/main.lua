@@ -71,15 +71,12 @@ function EreaderSync:addToMainMenu(menu_items)
         sub_item_table = {
             {
                 text = _("Sync all"),
-
                 callback = function()
                     self:onEreaderSyncAll()
                 end,
             },
-
             {
                 text = _("Status"),
-
                 callback = function()
                     self:onEreaderSyncStatus()
                 end,
@@ -107,21 +104,16 @@ function EreaderSync:fetchManifest()
 
     local request = {
         url = manifest_url,
-
         method = "GET",
 
         headers = {
-            ["Accept"] =
-                "application/json",
-
-            ["Accept-Encoding"] =
-                "identity",
+            ["Accept"] = "application/json",
+            ["Accept-Encoding"] = "identity",
         },
 
-        sink =
-            ltn12.sink.table(
-                sink
-            ),
+        sink = ltn12.sink.table(
+            sink
+        ),
     }
 
     local code,
@@ -226,30 +218,102 @@ function EreaderSync:fileExists(
             == "file"
 end
 
+function EreaderSync:ensureDirectory(
+    path
+)
+    local attributes =
+        lfs.attributes(
+            path
+        )
+
+    if attributes then
+        if attributes.mode == "directory" then
+            return true, nil
+        end
+
+        return false,
+            path
+            .. " exists but is not a directory"
+    end
+
+    local ok,
+        err =
+        lfs.mkdir(
+            path
+        )
+
+    if not ok then
+        return false,
+            tostring(err)
+    end
+
+    return true, nil
+end
+
+function EreaderSync:countFiles(
+    directory,
+    pattern
+)
+    local attributes =
+        lfs.attributes(
+            directory
+        )
+
+    if not attributes
+        or attributes.mode ~= "directory"
+    then
+        return 0
+    end
+
+    local count = 0
+
+    for file_name
+        in lfs.dir(
+            directory
+        )
+    do
+        if file_name
+            and file_name ~= "."
+            and file_name ~= ".."
+            and (
+                not pattern
+                or file_name:
+                    lower():
+                    match(pattern)
+            )
+        then
+            count =
+                count + 1
+        end
+    end
+
+    return count
+end
+
 ----------------------------------------------------------------------
 -- VERSION STATE
 ----------------------------------------------------------------------
 
 function EreaderSync:getRemoteVersion(
-    book
+    entry
 )
-    if book.etag
+    if entry.etag
         and tostring(
-            book.etag
+            entry.etag
         ) ~= ""
     then
         return tostring(
-            book.etag
+            entry.etag
         )
     end
 
     return
         tostring(
-            book.updated or ""
+            entry.updated or ""
         )
         .. ":"
         .. tostring(
-            book.size or ""
+            entry.size or ""
         )
 end
 
@@ -268,6 +332,27 @@ function EreaderSync:saveBookVersions(
     self.settings:
         saveSetting(
             "book_versions",
+            versions
+        )
+
+    self.settings:flush()
+end
+
+function EreaderSync:getStoredWallpaperVersions()
+    return self.settings:
+        readSetting(
+            "wallpaper_versions",
+            {}
+        )
+        or {}
+end
+
+function EreaderSync:saveWallpaperVersions(
+    versions
+)
+    self.settings:
+        saveSetting(
+            "wallpaper_versions",
             versions
         )
 
@@ -325,7 +410,6 @@ function EreaderSync:downloadFile(
             1,
             http.request{
                 url = url,
-
                 method = "GET",
 
                 headers = {
@@ -374,8 +458,7 @@ function EreaderSync:downloadFile(
         )
 
     if not attributes
-        or attributes.mode
-            ~= "file"
+        or attributes.mode ~= "file"
         or not attributes.size
         or attributes.size <= 0
     then
@@ -457,7 +540,6 @@ function EreaderSync:stopMetadataBackgroundJobs()
         err =
         pcall(
             function()
-
                 --------------------------------------------------
                 -- KOReader CoverBrowser extracts metadata and
                 -- covers in subprocesses.
@@ -512,28 +594,15 @@ function EreaderSync:invalidateBookMetadata(
         err =
         pcall(
             function()
-
-                --------------------------------------------------
-                -- Persistent metadata/cover cache.
-                --------------------------------------------------
-
                 BookInfoManager:
                     deleteBookInfo(
                         file
                     )
 
-                --------------------------------------------------
-                -- Generic in-memory BookList cache.
-                --------------------------------------------------
-
                 BookList
                     .resetBookInfoCache(
                         file
                     )
-
-                --------------------------------------------------
-                -- Notify all active metadata-aware components.
-                --------------------------------------------------
 
                 UIManager:
                     broadcastEvent(
@@ -565,9 +634,6 @@ function EreaderSync:invalidateChangedBooks(
 
     --------------------------------------------------------------
     -- FIRST PASS
-    --
-    -- Immediately after the new EPUBs have reached their final
-    -- path.
     --------------------------------------------------------------
 
     for _, file
@@ -604,12 +670,8 @@ function EreaderSync:invalidateChangedBooks(
     -- SECOND PASS
     --
     -- A metadata extraction subprocess that was already being
-    -- terminated could theoretically finish between replacement
-    -- and the first DELETE.
-    --
-    -- Delete the affected entries again shortly afterwards.
-    --
-    -- This does not depend on any particular library UI.
+    -- terminated could finish between replacement and the first
+    -- DELETE. Delete the affected entries again shortly later.
     --------------------------------------------------------------
 
     local files_for_second_pass = {}
@@ -626,10 +688,8 @@ function EreaderSync:invalidateChangedBooks(
     UIManager:scheduleIn(
         1,
         function()
-
             pcall(
                 function()
-
                     if BookInfoManager
                         .collectSubprocesses
                     then
@@ -692,16 +752,12 @@ function EreaderSync:syncBooks(
 )
     local result = {
         remote = 0,
-
         downloaded = 0,
         updated = 0,
         unchanged = 0,
-
         failed = 0,
-
         metadata_refreshed = 0,
         metadata_refresh_failed = 0,
-
         errors = {},
     }
 
@@ -711,12 +767,6 @@ function EreaderSync:syncBooks(
 
     result.remote =
         #manifest.books
-
-    --------------------------------------------------------------
-    -- IMPORTANT:
-    -- stop old CoverBrowser extraction jobs BEFORE replacing
-    -- any EPUB.
-    --------------------------------------------------------------
 
     local stopped,
         stop_error =
@@ -738,8 +788,7 @@ function EreaderSync:syncBooks(
 
     local changed_files = {}
 
-    for _,
-        book
+    for _, book
         in ipairs(
             manifest.books
         )
@@ -751,18 +800,16 @@ function EreaderSync:syncBooks(
 
         if not file_name then
             result.failed =
-                result.failed
-                + 1
+                result.failed + 1
 
             table.insert(
                 result.errors,
-                "Invalid filename"
+                "Invalid book filename"
             )
 
         elseif not book.download_url then
             result.failed =
-                result.failed
-                + 1
+                result.failed + 1
 
             table.insert(
                 result.errors,
@@ -802,29 +849,20 @@ function EreaderSync:syncBooks(
                 false
 
             if exists then
-
                 if not stored_version then
-                    needs_download =
-                        true
-
-                    is_update =
-                        true
-
+                    needs_download = true
+                    is_update = true
                 elseif stored_version
                     ~= remote_version
                 then
-                    needs_download =
-                        true
-
-                    is_update =
-                        true
+                    needs_download = true
+                    is_update = true
                 end
             end
 
             if not needs_download then
                 result.unchanged =
-                    result.unchanged
-                    + 1
+                    result.unchanged + 1
 
             else
                 local downloaded,
@@ -836,8 +874,7 @@ function EreaderSync:syncBooks(
 
                 if not downloaded then
                     result.failed =
-                        result.failed
-                        + 1
+                        result.failed + 1
 
                     table.insert(
                         result.errors,
@@ -856,21 +893,11 @@ function EreaderSync:syncBooks(
 
                     if is_update then
                         result.updated =
-                            result.updated
-                            + 1
-
+                            result.updated + 1
                     else
                         result.downloaded =
-                            result.downloaded
-                            + 1
+                            result.downloaded + 1
                     end
-
-                    --------------------------------------------------
-                    -- Do NOT invalidate immediately here.
-                    --
-                    -- Finish replacing all books first, then clear
-                    -- metadata in one controlled pass.
-                    --------------------------------------------------
 
                     table.insert(
                         changed_files,
@@ -881,17 +908,9 @@ function EreaderSync:syncBooks(
         end
     end
 
-    --------------------------------------------------------------
-    -- Persist versions only for successful downloads.
-    --------------------------------------------------------------
-
     self:saveBookVersions(
         versions
     )
-
-    --------------------------------------------------------------
-    -- Now that every EPUB is safely in place, invalidate metadata.
-    --------------------------------------------------------------
 
     local refreshed,
         refresh_errors =
@@ -921,6 +940,196 @@ function EreaderSync:syncBooks(
 end
 
 ----------------------------------------------------------------------
+-- WALLPAPER SYNC (KINDLE)
+----------------------------------------------------------------------
+
+function EreaderSync:syncWallpapers(
+    manifest
+)
+    local result = {
+        remote = 0,
+        downloaded = 0,
+        updated = 0,
+        unchanged = 0,
+        failed = 0,
+        errors = {},
+    }
+
+    if not manifest.wallpapers then
+        return result
+    end
+
+    result.remote =
+        #manifest.wallpapers
+
+    local directory_ok,
+        directory_error =
+        self:ensureDirectory(
+            WALLPAPERS_DIR
+        )
+
+    if not directory_ok then
+        result.failed =
+            result.remote
+
+        table.insert(
+            result.errors,
+            "Could not prepare wallpapers directory: "
+            .. tostring(
+                directory_error
+            )
+        )
+
+        return result
+    end
+
+    local versions =
+        self:getStoredWallpaperVersions()
+
+    for _, wallpaper
+        in ipairs(
+            manifest.wallpapers
+        )
+    do
+        local file_name =
+            self:safeFileName(
+                wallpaper.name
+            )
+
+        if not file_name then
+            result.failed =
+                result.failed + 1
+
+            table.insert(
+                result.errors,
+                "Invalid wallpaper filename"
+            )
+
+        elseif not file_name:
+            lower():
+            match("%.jpe?g$")
+        then
+            result.failed =
+                result.failed + 1
+
+            table.insert(
+                result.errors,
+                file_name
+                .. ": unsupported Kindle wallpaper type"
+            )
+
+        elseif not wallpaper.download_url then
+            result.failed =
+                result.failed + 1
+
+            table.insert(
+                result.errors,
+                file_name
+                .. ": missing download URL"
+            )
+
+        else
+            local destination =
+                WALLPAPERS_DIR
+                .. "/"
+                .. file_name
+
+            local exists =
+                self:fileExists(
+                    destination
+                )
+
+            local remote_version =
+                self:getRemoteVersion(
+                    wallpaper
+                )
+
+            local version_key =
+                wallpaper.key
+                or file_name
+
+            local stored_version =
+                versions[
+                    version_key
+                ]
+
+            local needs_download =
+                not exists
+
+            local is_update =
+                false
+
+            if exists then
+                if not stored_version then
+                    --------------------------------------------------
+                    -- First version-aware wallpaper sync.
+                    --
+                    -- Download once so the local file definitely
+                    -- matches the prepared R2 Kindle wallpaper.
+                    --------------------------------------------------
+
+                    needs_download = true
+                    is_update = true
+
+                elseif stored_version
+                    ~= remote_version
+                then
+                    needs_download = true
+                    is_update = true
+                end
+            end
+
+            if not needs_download then
+                result.unchanged =
+                    result.unchanged + 1
+
+            else
+                local downloaded,
+                    download_error =
+                    self:downloadFile(
+                        wallpaper.download_url,
+                        destination
+                    )
+
+                if not downloaded then
+                    result.failed =
+                        result.failed + 1
+
+                    table.insert(
+                        result.errors,
+                        file_name
+                        .. ": "
+                        .. tostring(
+                            download_error
+                        )
+                    )
+
+                else
+                    versions[
+                        version_key
+                    ] =
+                        remote_version
+
+                    if is_update then
+                        result.updated =
+                            result.updated + 1
+                    else
+                        result.downloaded =
+                            result.downloaded + 1
+                    end
+                end
+            end
+        end
+    end
+
+    self:saveWallpaperVersions(
+        versions
+    )
+
+    return result
+end
+
+----------------------------------------------------------------------
 -- SYNC ALL
 ----------------------------------------------------------------------
 
@@ -938,7 +1147,6 @@ function EreaderSync:onEreaderSyncAll()
 
     UIManager:nextTick(
         function()
-
             local manifest,
                 manifest_error =
                 self:fetchManifest()
@@ -964,6 +1172,11 @@ function EreaderSync:onEreaderSyncAll()
 
             local books =
                 self:syncBooks(
+                    manifest
+                )
+
+            local wallpapers =
+                self:syncWallpapers(
                     manifest
                 )
 
@@ -1010,20 +1223,65 @@ function EreaderSync:onEreaderSyncAll()
                     )
             end
 
-            if #books.errors > 0 then
+            message =
+                message
+                .. "\n\n"
+                .. "Wallpapers\n"
+                .. "New: "
+                .. tostring(
+                    wallpapers.downloaded
+                )
+                .. "\n"
+                .. "Updated: "
+                .. tostring(
+                    wallpapers.updated
+                )
+                .. "\n"
+                .. "Unchanged: "
+                .. tostring(
+                    wallpapers.unchanged
+                )
+                .. "\n"
+                .. "Failed: "
+                .. tostring(
+                    wallpapers.failed
+                )
+
+            local all_errors = {}
+
+            for _, err
+                in ipairs(
+                    books.errors
+                )
+            do
+                table.insert(
+                    all_errors,
+                    "Book: "
+                    .. err
+                )
+            end
+
+            for _, err
+                in ipairs(
+                    wallpapers.errors
+                )
+            do
+                table.insert(
+                    all_errors,
+                    "Wallpaper: "
+                    .. err
+                )
+            end
+
+            if #all_errors > 0 then
                 message =
                     message
                     .. "\n\nWarnings / errors:\n"
                     .. table.concat(
-                        books.errors,
+                        all_errors,
                         "\n"
                     )
             end
-
-            message =
-                message
-                .. "\n\n"
-                .. "Wallpapers: not synced yet"
 
             UIManager:show(
                 InfoMessage:new{
@@ -1070,36 +1328,38 @@ function EreaderSync:onEreaderSyncStatus()
         or 0
 
     local local_book_count =
-        0
-
-    for file_name
-        in lfs.dir(
-            BOOKS_DIR
+        self:countFiles(
+            BOOKS_DIR,
+            "%.epub$"
         )
-    do
-        if file_name
-            and file_name:
-                lower():
-                match("%.epub$")
-        then
-            local_book_count =
-                local_book_count
-                + 1
-        end
-    end
 
-    local versions =
+    local local_wallpaper_count =
+        self:countFiles(
+            WALLPAPERS_DIR,
+            "%.jpe?g$"
+        )
+
+    local book_versions =
         self:getStoredBookVersions()
 
-    local tracked_count =
-        0
+    local wallpaper_versions =
+        self:getStoredWallpaperVersions()
+
+    local tracked_book_count = 0
+    local tracked_wallpaper_count = 0
 
     for _ in pairs(
-        versions
+        book_versions
     ) do
-        tracked_count =
-            tracked_count
-            + 1
+        tracked_book_count =
+            tracked_book_count + 1
+    end
+
+    for _ in pairs(
+        wallpaper_versions
+    ) do
+        tracked_wallpaper_count =
+            tracked_wallpaper_count + 1
     end
 
     UIManager:show(
@@ -1120,12 +1380,23 @@ function EreaderSync:onEreaderSyncStatus()
                 .. "\n"
                 .. "Version tracked: "
                 .. tostring(
-                    tracked_count
+                    tracked_book_count
                 )
                 .. "\n\n"
-                .. "Remote wallpapers: "
+                .. "Wallpapers\n"
+                .. "Remote: "
                 .. tostring(
                     remote_wallpaper_count
+                )
+                .. "\n"
+                .. "Local: "
+                .. tostring(
+                    local_wallpaper_count
+                )
+                .. "\n"
+                .. "Version tracked: "
+                .. tostring(
+                    tracked_wallpaper_count
                 )
                 .. "\n\n"
                 .. "Books: "
