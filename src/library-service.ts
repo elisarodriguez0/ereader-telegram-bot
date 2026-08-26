@@ -278,10 +278,19 @@ async function opds(
 			const name = String(object.key).slice(
 				"books/".length,
 			);
+			/*
+			 * syncTitle/syncAuthor are the canonical filename components.
+			 * CrossInk can be configured as "Title - Author", so exposing
+			 * these in OPDS keeps its downloaded filename identical to the
+			 * R2/Kindle filename even when the provider title contains an
+			 * edition label such as "(Standard Edition)".
+			 */
 			const title =
+				object.customMetadata?.syncTitle ??
 				object.customMetadata?.title ??
 				name.replace(/\.epub$/i, "");
 			const author =
+				object.customMetadata?.syncAuthor ??
 				object.customMetadata?.author;
 			const updated =
 				object.uploaded instanceof Date

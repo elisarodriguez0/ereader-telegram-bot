@@ -164,9 +164,7 @@ function mapVolume(
 			info?.categories
 				?.map(
 					(value) =>
-						cleanText(
-							value,
-						),
+						cleanText(value),
 				)
 				.filter(
 					(
@@ -260,31 +258,62 @@ function scoreCandidate(
 					) === expected,
 			);
 
-		return expected && matches
-			? 100
-			: 0;
+		if (!expected || !matches) {
+			return 0;
+		}
+
+		/*
+		 * ISBN is edition-specific.
+		 *
+		 * A matching English ISBN must NOT win in a
+		 * Spanish-only library merely because its ISBN
+		 * matches perfectly.
+		 */
+		if (
+			hints.language &&
+			(
+				!metadata.language ||
+				!languageMatches(
+					hints.language,
+					metadata.language,
+				)
+			)
+		) {
+			return 0;
+		}
+
+		return 100;
+	}
+
+	/*
+	 * langRestrict asks Google for Spanish books, but
+	 * we check volumeInfo.language too.
+	 *
+	 * This prevents an English edition leaking through
+	 * a fuzzy title/author search.
+	 */
+	if (
+		hints.language &&
+		(
+			!metadata.language ||
+			!languageMatches(
+				hints.language,
+				metadata.language,
+			)
+		)
+	) {
+		return 0;
 	}
 
 	if (
 		hypothesis.kind ===
-		"title"
+			"title"
 	) {
 		let score =
 			scoreTitleMatch(
 				hints,
 				metadata,
 			);
-
-		if (
-			hints.language &&
-			metadata.language &&
-			!languageMatches(
-				hints.language,
-				metadata.language,
-			)
-		) {
-			score -= 15;
-		}
 
 		score *=
 			0.88 +
@@ -309,12 +338,8 @@ function scoreCandidate(
 			);
 
 		/*
-		 * Google can only resolve a
-		 * series hypothesis if its own
-		 * seriesInfo confirms the volume
-		 * position. Merely finding the
-		 * series words in search results
-		 * is not enough.
+		 * Google can only resolve a series hypothesis if
+		 * its own seriesInfo confirms the volume position.
 		 */
 		if (
 			!expectedIndex ||
@@ -459,14 +484,11 @@ export async function lookupGoogleBooks(
 				);
 
 			/*
-			 * Google Books does not give us
-			 * a reliable human-readable
-			 * series name in volumeInfo.
+			 * Google doesn't expose a reliably useful
+			 * human-readable series label.
 			 *
-			 * If seriesInfo confirms the
-			 * requested position, we retain
-			 * the queried series name as the
-			 * confirmed series label.
+			 * When its seriesInfo confirms the requested
+			 * volume number, retain our known series label.
 			 */
 			if (
 				hypothesis.kind ===
@@ -492,9 +514,7 @@ export async function lookupGoogleBooks(
 					metadata,
 				);
 
-			if (
-				score <= 0
-			) {
+			if (score <= 0) {
 				continue;
 			}
 
