@@ -450,7 +450,7 @@ export async function prepareXteinkWallpaper(
 					"image/jpeg",
 
 				quality:
-					90,
+					100,
 			});
 
 	const response =
