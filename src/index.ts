@@ -11,6 +11,10 @@ import {
 } from "./library-service";
 
 import {
+	handleStatsRoute,
+} from "./stats-service";
+
+import {
 	answerCallbackQuery,
 	downloadTelegramFile,
 	isAllowedTelegramUser,
@@ -92,7 +96,6 @@ async function handleEpubMessage(
 				document.file_id,
 				document.file_size,
 			);
-
 		const stored =
 			await prepareAndStoreEpub(
 				env,
@@ -417,6 +420,16 @@ async function fetchHandler(
 	ctx: ExecutionContextLike,
 ): Promise<Response> {
 	const url = new URL(request.url);
+
+	const statsResponse =
+		await handleStatsRoute(
+			request,
+			env,
+		);
+
+	if (statsResponse) {
+		return statsResponse;
+	}
 
 	const libraryResponse =
 		await handleLibraryRoute(

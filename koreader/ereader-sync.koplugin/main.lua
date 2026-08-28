@@ -6,9 +6,11 @@ local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
+local SQ3 = require("lua-ljsqlite3/init")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local lfs = require("libs/libkoreader-lfs")
+local logger = require("logger")
 local ltn12 = require("ltn12")
 local socket = require("socket")
 local http = require("socket.http")
@@ -19,6 +21,13 @@ local config = require("config")
 
 local BOOKS_DIR = "/mnt/us/Books"
 local WALLPAPERS_DIR = "/mnt/us/screensaver"
+
+local STATS_DB =
+    DataStorage:getSettingsDir()
+    .. "/statistics.sqlite3"
+
+local SESSION_GAP_SECONDS = 30 * 60
+local MIN_COUNTED_SESSION_SECONDS = 3 * 60
 
 local SETTINGS_FILE =
     DataStorage:getSettingsDir()
@@ -31,7 +40,724 @@ local EreaderSync = WidgetContainer:extend{
     settings = LuaSettings:open(
         SETTINGS_FILE
     ),
+
+    kosync_instance = nil,
+    kosync_original_update_progress = nil,
+    kosync_wrapped_update_progress = nil,
 }
+
+----------------------------------------------------------------------
+-- KINDLE READING STATS
+--
+-- This is intentionally part of Ereader Sync instead of a separate plugin.
+-- A successful *interactive* KOReader Progress Sync push triggers a silent
+-- upload of the cumulative statistics snapshot to /stats/kindle.
+----------------------------------------------------------------------
+
+local function cleanStatsText(value, fallback)
+    if value == nil then
+        return fallback or ""
+    end
+
+    local result =
+        tostring(value)
+            :gsub("%z", "")
+            :gsub("^%s+", "")
+            :gsub("%s+$", "")
+
+    if result == "" then
+        return fallback or ""
+    end
+
+    return result
+end
+
+local function makeStatsBookName(title, author)
+    title =
+        cleanStatsText(
+            title,
+            "Unknown title"
+        )
+
+    author =
+        cleanStatsText(
+            author,
+            ""
+        )
+
+    if author ~= "" then
+        return title
+            .. " - "
+            .. author
+            .. ".epub"
+    end
+
+    return title
+        .. ".epub"
+end
+
+local function addStatsDayRecord(
+    grouped,
+    title,
+    author,
+    date,
+    reading_seconds,
+    sessions
+)
+    if reading_seconds <= 0 then
+        return
+    end
+
+    local book =
+        makeStatsBookName(
+            title,
+            author
+        )
+
+    local key =
+        book
+        .. "\0"
+        .. date
+
+    local record =
+        grouped[key]
+
+    if not record then
+        record = {
+            book = book,
+            title =
+                cleanStatsText(
+                    title,
+                    "Unknown title"
+                ),
+            author =
+                cleanStatsText(
+                    author,
+                    ""
+                ),
+            date = date,
+            reading_seconds = 0,
+            sessions = 0,
+        }
+
+        grouped[key] =
+            record
+    end
+
+    record.reading_seconds =
+        record.reading_seconds
+        + reading_seconds
+
+    record.sessions =
+        record.sessions
+        + sessions
+end
+
+local function finishStatsSession(
+    grouped,
+    session
+)
+    if not session then
+        return
+    end
+
+    local counted =
+        session.duration
+        >= MIN_COUNTED_SESSION_SECONDS
+
+    addStatsDayRecord(
+        grouped,
+        session.title,
+        session.author,
+        session.date,
+        session.duration,
+        counted and 1 or 0
+    )
+end
+
+local function buildReadingStatsSnapshot()
+    local attributes =
+        lfs.attributes(
+            STATS_DB
+        )
+
+    if not attributes
+        or attributes.mode ~= "file"
+    then
+        return nil,
+            "KOReader statistics database not found: "
+            .. STATS_DB
+    end
+
+    local opened,
+        conn_or_error =
+        pcall(
+            SQ3.open,
+            STATS_DB
+        )
+
+    if not opened
+        or not conn_or_error
+    then
+        return nil,
+            "Could not open statistics.sqlite3: "
+            .. tostring(
+                conn_or_error
+            )
+    end
+
+    local conn =
+        conn_or_error
+
+    pcall(
+        function()
+            conn:exec(
+                "PRAGMA query_only=ON;"
+            )
+        end
+    )
+
+    local sql = [[
+SELECT
+    b.title,
+    b.authors,
+    p.start_time,
+    p.duration
+FROM page_stat_data AS p
+JOIN book AS b
+    ON b.id = p.id_book
+WHERE
+    p.start_time > 0
+    AND p.duration > 0
+ORDER BY
+    b.title,
+    b.authors,
+    p.start_time;
+]]
+
+    local prepared,
+        stmt_or_error =
+        pcall(
+            function()
+                return conn:prepare(
+                    sql
+                )
+            end
+        )
+
+    if not prepared
+        or not stmt_or_error
+    then
+        conn:close()
+
+        return nil,
+            "Could not query KOReader statistics: "
+            .. tostring(
+                stmt_or_error
+            )
+    end
+
+    local stmt =
+        stmt_or_error
+
+    local grouped = {}
+    local current_session = nil
+
+    while true do
+        local stepped,
+            row =
+            pcall(
+                function()
+                    return stmt:step()
+                end
+            )
+
+        if not stepped then
+            stmt:close()
+            conn:close()
+
+            return nil,
+                "Could not read KOReader statistics: "
+                .. tostring(row)
+        end
+
+        if not row then
+            break
+        end
+
+        local title =
+            cleanStatsText(
+                row[1],
+                "Unknown title"
+            )
+
+        local author =
+            cleanStatsText(
+                row[2],
+                ""
+            )
+
+        local start_time =
+            tonumber(row[3])
+            or 0
+
+        local duration =
+            math.floor(
+                tonumber(row[4])
+                or 0
+            )
+
+        if start_time > 0
+            and duration > 0
+        then
+            local date =
+                os.date(
+                    "%Y-%m-%d",
+                    start_time
+                )
+
+            local same_session =
+                current_session
+                and current_session.title
+                    == title
+                and current_session.author
+                    == author
+                and current_session.date
+                    == date
+                and start_time
+                    <= (
+                        current_session.last_end
+                        + SESSION_GAP_SECONDS
+                    )
+
+            if not same_session then
+                finishStatsSession(
+                    grouped,
+                    current_session
+                )
+
+                current_session = {
+                    title = title,
+                    author = author,
+                    date = date,
+                    duration = 0,
+                    last_end =
+                        start_time,
+                }
+            end
+
+            current_session.duration =
+                current_session.duration
+                + duration
+
+            local row_end =
+                start_time
+                + duration
+
+            if row_end
+                > current_session.last_end
+            then
+                current_session.last_end =
+                    row_end
+            end
+        end
+    end
+
+    finishStatsSession(
+        grouped,
+        current_session
+    )
+
+    stmt:close()
+    conn:close()
+
+    local days = {}
+
+    for _,
+        record
+        in pairs(grouped)
+    do
+        table.insert(
+            days,
+            record
+        )
+    end
+
+    table.sort(
+        days,
+        function(a, b)
+            if a.date
+                ~= b.date
+            then
+                return a.date
+                    < b.date
+            end
+
+            return a.book
+                < b.book
+        end
+    )
+
+    return {
+        schema_version = 1,
+        device = "kindle",
+        generated_at =
+            os.date(
+                "!%Y-%m-%dT%H:%M:%SZ"
+            ),
+        days = days,
+    }, nil
+end
+
+local function uploadReadingStatsSnapshot(
+    snapshot
+)
+    local body =
+        JSON.encode(
+            snapshot
+        )
+
+    local sink = {}
+
+    local url =
+        config.base_url
+        .. "/stats/kindle?token="
+        .. config.library_token
+
+    socketutil:set_timeout(
+        socketutil.LARGE_BLOCK_TIMEOUT,
+        socketutil.LARGE_TOTAL_TIMEOUT
+    )
+
+    local code,
+        headers,
+        status =
+        socket.skip(
+            1,
+            http.request{
+                url = url,
+                method = "PUT",
+
+                headers = {
+                    ["Accept"] =
+                        "application/json",
+                    ["Accept-Encoding"] =
+                        "identity",
+                    ["Content-Type"] =
+                        "application/json",
+                    ["Content-Length"] =
+                        tostring(
+                            #body
+                        ),
+                },
+
+                source =
+                    ltn12.source.string(
+                        body
+                    ),
+
+                sink =
+                    ltn12.sink.table(
+                        sink
+                    ),
+            }
+        )
+
+    socketutil:reset_timeout()
+
+    if headers == nil then
+        return false,
+            status
+            or code
+            or "Network unreachable"
+    end
+
+    local response_body =
+        table.concat(
+            sink
+        )
+
+    if code ~= 200 then
+        return false,
+            "HTTP "
+            .. tostring(code)
+            .. (
+                response_body ~= ""
+                and (
+                    ": "
+                    .. response_body
+                )
+                or ""
+            )
+    end
+
+    local decoded,
+        response =
+        pcall(
+            JSON.decode,
+            response_body,
+            JSON.decode.simple
+        )
+
+    if not decoded
+        or not response
+        or response.ok ~= true
+    then
+        return false,
+            "Server rejected statistics snapshot"
+    end
+
+    return true, nil
+end
+
+function EreaderSync:uploadReadingStatsAfterKOSyncPush()
+    local snapshot,
+        snapshot_error =
+        buildReadingStatsSnapshot()
+
+    if not snapshot then
+        logger.warn(
+            "EreaderSync:",
+            "could not build reading stats snapshot:",
+            tostring(
+                snapshot_error
+            )
+        )
+
+        return false
+    end
+
+    local uploaded,
+        upload_error =
+        uploadReadingStatsSnapshot(
+            snapshot
+        )
+
+    if not uploaded then
+        logger.warn(
+            "EreaderSync:",
+            "could not upload reading stats after KOSync push:",
+            tostring(
+                upload_error
+            )
+        )
+
+        return false
+    end
+
+    logger.info(
+        "EreaderSync:",
+        "reading stats uploaded after successful KOSync push;",
+        "records:",
+        tostring(
+            #snapshot.days
+        )
+    )
+
+    return true
+end
+
+function EreaderSync:attachReadingStatsToKOSync()
+    local kosync =
+        self.ui
+        and self.ui.kosync
+
+    if not kosync
+        or type(
+            kosync.updateProgress
+        ) ~= "function"
+    then
+        logger.warn(
+            "EreaderSync:",
+            "KOSync instance not available; stats hook not attached"
+        )
+
+        return false
+    end
+
+    if kosync
+        .__ereader_sync_stats_hook
+    then
+        self.kosync_instance =
+            kosync
+
+        return true
+    end
+
+    local owner =
+        self
+
+    local original_update_progress =
+        kosync.updateProgress
+
+    local wrapped_update_progress
+
+    wrapped_update_progress =
+        function(
+            kosync_self,
+            ensure_networking,
+            interactive,
+            on_suspend
+        )
+            ----------------------------------------------------------
+            -- Only interactive pushes belong to this workflow.
+            --
+            -- KOReader uses updateProgress(true, true) for the manual
+            -- "Push progress from this device now" action. Automatic
+            -- background pushes have interactive == false and are left
+            -- completely untouched.
+            ----------------------------------------------------------
+
+            if interactive ~= true then
+                return original_update_progress(
+                    kosync_self,
+                    ensure_networking,
+                    interactive,
+                    on_suspend
+                )
+            end
+
+            ----------------------------------------------------------
+            -- KOSyncClient performs its request asynchronously.
+            --
+            -- Wrap the callback for this invocation only. That lets us
+            -- upload statistics *after* KOReader confirms the progress
+            -- push succeeded, rather than merely when Wi-Fi connects.
+            ----------------------------------------------------------
+
+            local KOSyncClient =
+                require(
+                    "KOSyncClient"
+                )
+
+            local original_client_update =
+                KOSyncClient
+                    .update_progress
+
+            KOSyncClient.update_progress =
+                function(
+                    client,
+                    username,
+                    password,
+                    document,
+                    metadata,
+                    progress,
+                    percentage,
+                    device,
+                    device_id,
+                    callback
+                )
+                    local wrapped_callback =
+                        function(
+                            ok,
+                            status,
+                            body
+                        )
+                            if ok then
+                                UIManager:nextTick(
+                                    function()
+                                        owner:
+                                            uploadReadingStatsAfterKOSyncPush()
+                                    end
+                                )
+                            end
+
+                            return callback(
+                                ok,
+                                status,
+                                body
+                            )
+                        end
+
+                    return original_client_update(
+                        client,
+                        username,
+                        password,
+                        document,
+                        metadata,
+                        progress,
+                        percentage,
+                        device,
+                        device_id,
+                        wrapped_callback
+                    )
+                end
+
+            local called,
+                result1,
+                result2,
+                result3 =
+                pcall(
+                    original_update_progress,
+                    kosync_self,
+                    ensure_networking,
+                    interactive,
+                    on_suspend
+                )
+
+            KOSyncClient.update_progress =
+                original_client_update
+
+            if not called then
+                error(
+                    result1
+                )
+            end
+
+            return result1,
+                result2,
+                result3
+        end
+
+    self.kosync_instance =
+        kosync
+
+    self.kosync_original_update_progress =
+        original_update_progress
+
+    self.kosync_wrapped_update_progress =
+        wrapped_update_progress
+
+    kosync.updateProgress =
+        wrapped_update_progress
+
+    kosync
+        .__ereader_sync_stats_hook =
+        true
+
+    logger.info(
+        "EreaderSync:",
+        "reading stats hook attached to KOSync"
+    )
+
+    return true
+end
+
+function EreaderSync:onCloseWidget()
+    if self.kosync_instance
+        and self
+            .kosync_original_update_progress
+        and self
+            .kosync_wrapped_update_progress
+        and self.kosync_instance
+            .updateProgress
+            == self
+                .kosync_wrapped_update_progress
+    then
+        self.kosync_instance
+            .updateProgress =
+            self
+                .kosync_original_update_progress
+
+        self.kosync_instance
+            .__ereader_sync_stats_hook =
+            nil
+    end
+
+    self.kosync_instance = nil
+    self.kosync_original_update_progress = nil
+    self.kosync_wrapped_update_progress = nil
+end
 
 ----------------------------------------------------------------------
 -- INITIALIZATION
@@ -40,6 +766,19 @@ local EreaderSync = WidgetContainer:extend{
 function EreaderSync:init()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
+
+    if self.ui
+        and self.ui
+            .registerPostReaderReadyCallback
+    then
+        self.ui:
+            registerPostReaderReadyCallback(
+                function()
+                    self:
+                        attachReadingStatsToKOSync()
+                end
+            )
+    end
 end
 
 function EreaderSync:onDispatcherRegisterActions()
