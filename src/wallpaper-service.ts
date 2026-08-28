@@ -391,29 +391,148 @@ export async function prepareKindleWallpaper(
 }
 
 /*
- * Xteink X4 / CrossInk
+ * Xteink X4 / VCodex
  *
- * IMPORTANT:
+ * VCodex's own documentation recommends custom sleep images as:
  *
- * We deliberately DO NOT create the BMP inside
- * the Cloudflare Worker.
+ * - 480 x 800 pixels on X4
+ * - uncompressed BMP
+ * - 24-bit color depth
  *
- * The Worker only performs the expensive parts
- * Cloudflare Images is good at:
- *
- * - EXIF orientation
- * - resize
- * - aspect ratio
- * - white padding
- * - grayscale
- *
- * CrossInk will convert this prepared 480x800 JPEG
- * into its final uncompressed BMP when syncing it
- * into /.sleep/.
- *
- * This avoids expensive PNG decoding + dithering +
- * BMP encoding inside the Worker.
+ * Do not pre-quantize or dither the image here. VCodex already knows how
+ * to render a 24-bit BMP to the X4's native grayscale when the sleep screen
+ * is displayed. The Worker only prepares the pixels and wraps them in a
+ * standard 24-bit BI_RGB BMP.
  */
+function makeBmp24(
+	rgb: Uint8Array,
+	width: number,
+	height: number,
+): Uint8Array {
+	const sourceRowBytes =
+		width * 3;
+
+	const bmpRowBytes =
+		Math.ceil(
+			sourceRowBytes / 4,
+		) * 4;
+
+	const pixelBytes =
+		bmpRowBytes * height;
+
+	const headerBytes = 54;
+	const fileBytes =
+		headerBytes + pixelBytes;
+
+	if (
+		rgb.byteLength !==
+		sourceRowBytes * height
+	) {
+		throw new Error(
+			`Unexpected RGB output size: ${rgb.byteLength} bytes`,
+		);
+	}
+
+	const bmp =
+		new Uint8Array(
+			fileBytes,
+		);
+
+	const view =
+		new DataView(
+			bmp.buffer,
+		);
+
+	// BITMAPFILEHEADER
+	bmp[0] = 0x42; // B
+	bmp[1] = 0x4d; // M
+	view.setUint32(
+		2,
+		fileBytes,
+		true,
+	);
+	view.setUint32(
+		10,
+		headerBytes,
+		true,
+	);
+
+	// BITMAPINFOHEADER
+	view.setUint32(
+		14,
+		40,
+		true,
+	);
+	view.setInt32(
+		18,
+		width,
+		true,
+	);
+
+	// Negative height means top-down row order. Cloudflare's raw RGB output
+	// is top-down, and VCodex's Bitmap reader explicitly supports this form.
+	view.setInt32(
+		22,
+		-height,
+		true,
+	);
+	view.setUint16(
+		26,
+		1,
+		true,
+	); // planes
+	view.setUint16(
+		28,
+		24,
+		true,
+	); // bits per pixel
+	view.setUint32(
+		30,
+		0,
+		true,
+	); // BI_RGB = uncompressed
+	view.setUint32(
+		34,
+		pixelBytes,
+		true,
+	);
+
+	for (
+		let y = 0;
+		y < height;
+		y++
+	) {
+		const sourceRow =
+			y * sourceRowBytes;
+
+		const targetRow =
+			headerBytes +
+			y * bmpRowBytes;
+
+		for (
+			let x = 0;
+			x < width;
+			x++
+		) {
+			const source =
+				sourceRow + x * 3;
+
+			const target =
+				targetRow + x * 3;
+
+			// Cloudflare outputs RGB. BMP stores 24-bit pixels as BGR.
+			bmp[target] =
+				rgb[source + 2];
+			bmp[target + 1] =
+				rgb[source + 1];
+			bmp[target + 2] =
+				rgb[source];
+		}
+	}
+
+	return bmp;
+}
+
 export async function prepareXteinkWallpaper(
 	env: Env,
 	fileName: string,
@@ -437,20 +556,17 @@ export async function prepareXteinkWallpaper(
 					XTEINK_HEIGHT,
 
 				fit:
-				"cover",
+					"cover",
 
 				gravity:
-				"auto",
+					"auto",
 
 				saturation:
 					0,
 			})
 			.output({
 				format:
-					"image/jpeg",
-
-				quality:
-					100,
+					"rgb",
 			});
 
 	const response =
@@ -462,9 +578,18 @@ export async function prepareXteinkWallpaper(
 		);
 	}
 
-	const bytes =
-		await response
-			.arrayBuffer();
+	const rgb =
+		new Uint8Array(
+			await response
+				.arrayBuffer(),
+		);
+
+	const bmp =
+		makeBmp24(
+			rgb,
+			XTEINK_WIDTH,
+			XTEINK_HEIGHT,
+		);
 
 	const stem =
 		fileName.replace(
@@ -473,7 +598,7 @@ export async function prepareXteinkWallpaper(
 		);
 
 	const outputName =
-		`${stem}.jpg`;
+		`${stem}.bmp`;
 
 	const key =
 		`${XTEINK_PREFIX}${outputName}`;
@@ -482,16 +607,16 @@ export async function prepareXteinkWallpaper(
 		.EREADER_BUCKET
 		.put(
 			key,
-			bytes,
+			bmp,
 			{
 				httpMetadata: {
 					contentType:
-						"image/jpeg",
+						"image/bmp",
 				},
 
 				customMetadata: {
 					kind:
-						"wallpaper-xteink-x4-source",
+						"wallpaper-xteink-x4",
 
 					width:
 						String(
@@ -504,7 +629,7 @@ export async function prepareXteinkWallpaper(
 						),
 
 					format:
-						"jpeg-grayscale-source",
+						"bmp24-uncompressed",
 
 					finalFormat:
 						"bmp24-uncompressed",
@@ -517,6 +642,17 @@ export async function prepareXteinkWallpaper(
 				},
 			},
 		);
+
+	// Clean up the old per-wallpaper JPEG output from the previous pipeline.
+	// The original image remains untouched in wallpapers/original/.
+	await Promise.all([
+		env.EREADER_BUCKET.delete(
+			`${XTEINK_PREFIX}${stem}.jpg`,
+		),
+		env.EREADER_BUCKET.delete(
+			`${XTEINK_PREFIX}${stem}.jpeg`,
+		),
+	]);
 
 	return key;
 }
