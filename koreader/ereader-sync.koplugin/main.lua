@@ -511,6 +511,43 @@ local function uploadReadingStatsSnapshot(
 end
 
 function EreaderSync:uploadReadingStatsAfterKOSyncPush()
+    --------------------------------------------------------------
+    -- KOReader's statistics plugin may still have the current
+    -- reading session buffered in memory when KOSync finishes.
+    --
+    -- Force the normal ReaderUI FlushSettings event first so
+    -- statistics.sqlite3 contains the latest session before we
+    -- build and upload the cumulative snapshot.
+    --------------------------------------------------------------
+
+    local flushed,
+        flush_error =
+        pcall(
+            function()
+                if self.ui
+                    and self.ui.handleEvent
+                then
+                    self.ui:
+                        handleEvent(
+                            Event:new(
+                                "FlushSettings",
+                                true
+                            )
+                        )
+                end
+            end
+        )
+
+    if not flushed then
+        logger.warn(
+            "EreaderSync:",
+            "could not flush KOReader settings before stats upload:",
+            tostring(
+                flush_error
+            )
+        )
+    end
+
     local snapshot,
         snapshot_error =
         buildReadingStatsSnapshot()
@@ -600,22 +637,14 @@ function EreaderSync:attachReadingStatsToKOSync()
             on_suspend
         )
             ----------------------------------------------------------
-            -- Only interactive pushes belong to this workflow.
+            -- Every KOSync progress push belongs to this workflow.
             --
-            -- KOReader uses updateProgress(true, true) for the manual
-            -- "Push progress from this device now" action. Automatic
-            -- background pushes have interactive == false and are left
-            -- completely untouched.
+            -- Manual pushes use interactive == true, while KOReader
+            -- may also push automatically with interactive == false
+            -- (for example on suspend/close depending on KOSync
+            -- settings). Both must upload the same cumulative reading
+            -- statistics snapshot once the progress push succeeds.
             ----------------------------------------------------------
-
-            if interactive ~= true then
-                return original_update_progress(
-                    kosync_self,
-                    ensure_networking,
-                    interactive,
-                    on_suspend
-                )
-            end
 
             ----------------------------------------------------------
             -- KOSyncClient performs its request asynchronously.
