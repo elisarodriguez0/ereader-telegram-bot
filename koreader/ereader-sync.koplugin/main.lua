@@ -28,6 +28,9 @@ local STATS_DB =
 
 local SESSION_GAP_SECONDS = 30 * 60
 local MIN_COUNTED_SESSION_SECONDS = 3 * 60
+local MAX_TIMED_SESSION_DETAILS = 256
+local VALID_STATS_CLOCK_THRESHOLD = 1704067200 -- 2024-01-01 UTC
+local STATS_TIMING_CUTOVER_SETTING = "stats_timing_cutover"
 
 local SETTINGS_FILE =
     DataStorage:getSettingsDir()
@@ -102,9 +105,18 @@ local function addStatsDayRecord(
     author,
     date,
     reading_seconds,
-    sessions
+    sessions,
+    morning_seconds,
+    afternoon_seconds,
+    night_seconds,
+    session_detail
 )
-    if reading_seconds <= 0 then
+    if reading_seconds <= 0
+        and (morning_seconds or 0) <= 0
+        and (afternoon_seconds or 0) <= 0
+        and (night_seconds or 0) <= 0
+        and not session_detail
+    then
         return
     end
 
@@ -138,6 +150,10 @@ local function addStatsDayRecord(
             date = date,
             reading_seconds = 0,
             sessions = 0,
+            morning_seconds = 0,
+            afternoon_seconds = 0,
+            night_seconds = 0,
+            session_details = {},
         }
 
         grouped[key] =
@@ -151,11 +167,212 @@ local function addStatsDayRecord(
     record.sessions =
         record.sessions
         + sessions
+
+    record.morning_seconds =
+        record.morning_seconds
+        + (morning_seconds or 0)
+
+    record.afternoon_seconds =
+        record.afternoon_seconds
+        + (afternoon_seconds or 0)
+
+    record.night_seconds =
+        record.night_seconds
+        + (night_seconds or 0)
+
+    if session_detail then
+        table.insert(
+            record.session_details,
+            session_detail
+        )
+    end
+end
+
+local function getStatsPeriodForHour(hour)
+    if hour >= 6
+        and hour < 13
+    then
+        return "morning"
+    end
+
+    if hour >= 13
+        and hour < 21
+    then
+        return "afternoon"
+    end
+
+    return "night"
+end
+
+local function getNextStatsPeriodBoundary(timestamp)
+    local local_time =
+        os.date(
+            "*t",
+            timestamp
+        )
+
+    if local_time.hour < 6 then
+        local_time.hour = 6
+    elseif local_time.hour < 13 then
+        local_time.hour = 13
+    elseif local_time.hour < 21 then
+        local_time.hour = 21
+    else
+        -- Split Night at local midnight as well as at 06:00 so day/month
+        -- evolution never invents which date those minutes belonged to.
+        local_time.day =
+            local_time.day + 1
+        local_time.hour = 0
+    end
+
+    local_time.min = 0
+    local_time.sec = 0
+    local_time.isdst = nil
+
+    return os.time(
+        local_time
+    )
+end
+
+local function addStatsPeriodSegment(
+    grouped,
+    title,
+    author,
+    date,
+    period,
+    seconds
+)
+    if seconds <= 0 then
+        return
+    end
+
+    local key =
+        makeStatsBookName(
+            title,
+            author
+        )
+        .. "\0"
+        .. date
+
+    local record =
+        grouped[key]
+
+    if not record then
+        record = {
+            title = title,
+            author = author,
+            date = date,
+            morning_seconds = 0,
+            afternoon_seconds = 0,
+            night_seconds = 0,
+        }
+        grouped[key] = record
+    end
+
+    if period == "morning" then
+        record.morning_seconds =
+            record.morning_seconds
+            + seconds
+    elseif period == "afternoon" then
+        record.afternoon_seconds =
+            record.afternoon_seconds
+            + seconds
+    else
+        record.night_seconds =
+            record.night_seconds
+            + seconds
+    end
+end
+
+local function splitStatsDurationByPeriod(
+    start_time,
+    duration,
+    title,
+    author,
+    period_grouped
+)
+    local result = {
+        morning_seconds = 0,
+        afternoon_seconds = 0,
+        night_seconds = 0,
+    }
+
+    local cursor = start_time
+    local finish =
+        start_time + duration
+
+    while cursor < finish do
+        local local_time =
+            os.date(
+                "*t",
+                cursor
+            )
+
+        local boundary =
+            getNextStatsPeriodBoundary(
+                cursor
+            )
+
+        if not boundary
+            or boundary <= cursor
+        then
+            boundary =
+                cursor + 60
+        end
+
+        local segment_end =
+            math.min(
+                finish,
+                boundary
+            )
+
+        local segment =
+            math.max(
+                0,
+                segment_end - cursor
+            )
+
+        local period =
+            getStatsPeriodForHour(
+                local_time.hour
+            )
+
+        addStatsPeriodSegment(
+            period_grouped,
+            title,
+            author,
+            os.date(
+                "%Y-%m-%d",
+                cursor
+            ),
+            period,
+            segment
+        )
+
+        if period == "morning" then
+            result.morning_seconds =
+                result.morning_seconds
+                + segment
+        elseif period == "afternoon" then
+            result.afternoon_seconds =
+                result.afternoon_seconds
+                + segment
+        else
+            result.night_seconds =
+                result.night_seconds
+                + segment
+        end
+
+        cursor = segment_end
+    end
+
+    return result
 end
 
 local function finishStatsSession(
     grouped,
-    session
+    session,
+    timing_cutover
 )
     if not session then
         return
@@ -165,17 +382,97 @@ local function finishStatsSession(
         session.duration
         >= MIN_COUNTED_SESSION_SECONDS
 
+    local session_detail = nil
+
+    if counted
+        and session.start_time
+        and session.start_time
+            >= timing_cutover
+    then
+        session_detail = {
+            start_time =
+                session.start_time,
+            end_time =
+                session.last_end,
+            reading_seconds =
+                session.duration,
+            morning_seconds =
+                session.morning_seconds,
+            afternoon_seconds =
+                session.afternoon_seconds,
+            night_seconds =
+                session.night_seconds,
+        }
+    end
+
     addStatsDayRecord(
         grouped,
         session.title,
         session.author,
         session.date,
         session.duration,
-        counted and 1 or 0
+        counted and 1 or 0,
+        0,
+        0,
+        0,
+        session_detail
     )
 end
 
-local function buildReadingStatsSnapshot()
+local function trimStatsSessionDetails(days)
+    local starts = {}
+
+    for _, day in ipairs(days) do
+        for _, detail in ipairs(
+            day.session_details
+            or {}
+        ) do
+            table.insert(
+                starts,
+                detail.start_time
+            )
+        end
+    end
+
+    if #starts
+        <= MAX_TIMED_SESSION_DETAILS
+    then
+        return
+    end
+
+    table.sort(starts)
+
+    local cutoff =
+        starts[
+            #starts
+            - MAX_TIMED_SESSION_DETAILS
+            + 1
+        ]
+
+    for _, day in ipairs(days) do
+        local kept = {}
+
+        for _, detail in ipairs(
+            day.session_details
+            or {}
+        ) do
+            if detail.start_time
+                >= cutoff
+            then
+                table.insert(
+                    kept,
+                    detail
+                )
+            end
+        end
+
+        day.session_details = kept
+    end
+end
+
+local function buildReadingStatsSnapshot(
+    timing_cutover
+)
     local attributes =
         lfs.attributes(
             STATS_DB
@@ -261,6 +558,7 @@ ORDER BY
         stmt_or_error
 
     local grouped = {}
+    local period_grouped = {}
     local current_session = nil
 
     while true do
@@ -333,22 +631,49 @@ ORDER BY
             if not same_session then
                 finishStatsSession(
                     grouped,
-                    current_session
+                    current_session,
+                    timing_cutover
                 )
 
                 current_session = {
                     title = title,
                     author = author,
                     date = date,
+                    start_time =
+                        start_time,
                     duration = 0,
                     last_end =
                         start_time,
+                    morning_seconds = 0,
+                    afternoon_seconds = 0,
+                    night_seconds = 0,
                 }
             end
 
             current_session.duration =
                 current_session.duration
                 + duration
+
+            local periods =
+                splitStatsDurationByPeriod(
+                    start_time,
+                    duration,
+                    title,
+                    author,
+                    period_grouped
+                )
+
+            current_session.morning_seconds =
+                current_session.morning_seconds
+                + periods.morning_seconds
+
+            current_session.afternoon_seconds =
+                current_session.afternoon_seconds
+                + periods.afternoon_seconds
+
+            current_session.night_seconds =
+                current_session.night_seconds
+                + periods.night_seconds
 
             local row_end =
                 start_time
@@ -365,18 +690,38 @@ ORDER BY
 
     finishStatsSession(
         grouped,
-        current_session
+        current_session,
+        timing_cutover
     )
 
     stmt:close()
     conn:close()
 
+    -- Time-of-day metadata is attached to the actual local date of every
+    -- recorded interval. This remains exact across midnight/month boundaries
+    -- without changing the existing reading-time totals.
+    for _, period_record in pairs(period_grouped) do
+        addStatsDayRecord(
+            grouped,
+            period_record.title,
+            period_record.author,
+            period_record.date,
+            0,
+            0,
+            period_record.morning_seconds,
+            period_record.afternoon_seconds,
+            period_record.night_seconds,
+            nil
+        )
+    end
+
     local days = {}
 
-    for _,
-        record
-        in pairs(grouped)
-    do
+    for _, record in pairs(grouped) do
+        if #record.session_details == 0 then
+            record.session_details = nil
+        end
+
         table.insert(
             days,
             record
@@ -396,6 +741,10 @@ ORDER BY
             return a.book
                 < b.book
         end
+    )
+
+    trimStatsSessionDetails(
+        days
     )
 
     return {
@@ -510,6 +859,42 @@ local function uploadReadingStatsSnapshot(
     return true, nil
 end
 
+function EreaderSync:getStatsTimingCutover()
+    local saved =
+        tonumber(
+            self.settings:
+                readSetting(
+                    STATS_TIMING_CUTOVER_SETTING
+                )
+        )
+        or 0
+
+    if saved
+        >= VALID_STATS_CLOCK_THRESHOLD
+    then
+        return saved
+    end
+
+    local now = os.time()
+
+    if now
+        and now
+            >= VALID_STATS_CLOCK_THRESHOLD
+    then
+        self.settings:
+            saveSetting(
+                STATS_TIMING_CUTOVER_SETTING,
+                now
+            )
+        self.settings:flush()
+        return now
+    end
+
+    -- Period aggregates can still be reconstructed later from real SQLite
+    -- timestamps, but detailed sessions must never get a fabricated cutoff.
+    return 2147483647
+end
+
 function EreaderSync:uploadReadingStatsAfterKOSyncPush()
     --------------------------------------------------------------
     -- KOReader's statistics plugin may still have the current
@@ -550,7 +935,9 @@ function EreaderSync:uploadReadingStatsAfterKOSyncPush()
 
     local snapshot,
         snapshot_error =
-        buildReadingStatsSnapshot()
+        buildReadingStatsSnapshot(
+            self:getStatsTimingCutover()
+        )
 
     if not snapshot then
         logger.warn(
@@ -793,6 +1180,7 @@ end
 ----------------------------------------------------------------------
 
 function EreaderSync:init()
+    self:getStatsTimingCutover()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 
