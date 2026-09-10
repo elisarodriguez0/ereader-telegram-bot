@@ -7,6 +7,10 @@ import {
 } from "./metadata/epub";
 
 import {
+	optimizeEpubForXteink,
+} from "./epub-optimizer";
+
+import {
 	isMeaningful,
 	parseStructuredSeriesTitle,
 } from "./metadata/normalize";
@@ -19,8 +23,10 @@ import type {
 
 export interface StoredEpubResult {
 	key: string;
+	xteinkKey: string;
 	fileName: string;
 	size: number;
+	xteinkSize: number;
 	metadata: BookMetadata;
 	resolved: ResolvedMetadata;
 	message: string;
@@ -288,8 +294,16 @@ function formatDateAndPages(
 
 function formatTelegramMessage(
 	key: string,
+	xteinkKey: string,
 	metadata: BookMetadata,
 	resolved: ResolvedMetadata,
+	optimization: {
+		originalSize: number;
+		optimizedSize: number;
+		optimizedImages: number;
+		skippedImages: number;
+		svgFixes: number;
+	},
 ): string {
 	const lines: string[] = [
 		"📚 EPUB preparado",
@@ -379,9 +393,21 @@ function formatTelegramMessage(
 		}
 	}
 
+	const sizeMb = (value: number) =>
+		`${(value / (1024 * 1024)).toFixed(2)} MB`;
+
 	lines.push(
 		"",
-		`☁️ ${key}`,
+		`☁️ Kindle: ${key}`,
+		`⚙️ X4: ${xteinkKey}`,
+		`🖼️ X4: ${optimization.optimizedImages} imágenes optimizadas` +
+			(optimization.skippedImages
+				? ` · ${optimization.skippedImages} conservadas`
+				: "") +
+			(optimization.svgFixes
+				? ` · ${optimization.svgFixes} SVG corregidos`
+				: ""),
+		`📦 X4: ${sizeMb(optimization.originalSize)} → ${sizeMb(optimization.optimizedSize)}`,
 		"",
 		"✅ Listo para sincronizar.",
 	);
@@ -442,6 +468,15 @@ export async function prepareAndStoreEpub(
 
 	const key =
 		`books/${fileName}`;
+
+	const xteinkKey =
+		`books_xteink/${fileName}`;
+
+	const xteinkOptimization =
+		await optimizeEpubForXteink(
+			env,
+			repaired.bytes,
+		);
 
 	const customMetadata: Record<
 		string,
@@ -505,30 +540,73 @@ export async function prepareAndStoreEpub(
 			metadata.description.slice(0, 300);
 	}
 
-	await env.EREADER_BUCKET.put(
-		key,
-		repaired.bytes,
-		{
-			httpMetadata: {
-				contentType:
-					"application/epub+zip",
-				contentDisposition:
-					`attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+	const commonHttpMetadata = {
+		contentType:
+			"application/epub+zip",
+		contentDisposition:
+			`attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+	};
+
+	await Promise.all([
+		env.EREADER_BUCKET.put(
+			key,
+			repaired.bytes,
+			{
+				httpMetadata:
+					commonHttpMetadata,
+				customMetadata: {
+					...customMetadata,
+					variant:
+						"original-repaired",
+				},
 			},
-			customMetadata,
-		},
-	);
+		),
+		env.EREADER_BUCKET.put(
+			xteinkKey,
+			xteinkOptimization.bytes,
+			{
+				httpMetadata:
+					commonHttpMetadata,
+				customMetadata: {
+					...customMetadata,
+					variant:
+						"xteink-optimized",
+					optimizedImages:
+						String(
+							xteinkOptimization.optimizedImages,
+						),
+					skippedImages:
+						String(
+							xteinkOptimization.skippedImages,
+						),
+					svgFixes:
+						String(
+							xteinkOptimization.svgFixes,
+						),
+					sourceSize:
+						String(
+							xteinkOptimization.originalSize,
+						),
+				},
+			},
+		),
+	]);
 
 	return {
 		key,
+		xteinkKey,
 		fileName,
 		size: repaired.bytes.byteLength,
+		xteinkSize:
+			xteinkOptimization.optimizedSize,
 		metadata,
 		resolved: repaired.resolved,
 		message: formatTelegramMessage(
 			key,
+			xteinkKey,
 			metadata,
 			repaired.resolved,
+			xteinkOptimization,
 		),
 	};
 }

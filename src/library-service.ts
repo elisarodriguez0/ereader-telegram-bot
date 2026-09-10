@@ -128,12 +128,17 @@ async function manifest(
 
 	const [
 		bookObjects,
+		xteinkBookObjects,
 		kindleWallpaperObjects,
 		xteinkWallpaperObjects,
 	] = await Promise.all([
 		listAllObjects(
 			env,
 			"books/",
+		),
+		listAllObjects(
+			env,
+			"books_xteink/",
 		),
 		listAllObjects(
 			env,
@@ -160,6 +165,61 @@ async function manifest(
 				"/download",
 			),
 		)
+		.sort((a, b) =>
+			a.name.localeCompare(b.name),
+		);
+
+	/*
+	 * X4 gets an optimized variant when one exists, but the list stays complete
+	 * for books uploaded before this feature. Both variants intentionally keep
+	 * the exact same basename for KOReader filename-based progress sync.
+	 */
+	const xteinkByName = new Map(
+		xteinkBookObjects
+			.filter((object) =>
+				String(object.key)
+					.toLowerCase()
+					.endsWith(".epub"),
+			)
+			.map((object) => [
+				String(object.key).slice(
+					"books_xteink/".length,
+				),
+				object,
+			]),
+	);
+
+	const books_xteink = bookObjects
+		.filter((object) =>
+			String(object.key)
+				.toLowerCase()
+				.endsWith(".epub"),
+		)
+		.map((originalObject) => {
+			const name = String(
+				originalObject.key,
+			).slice(
+				"books/".length,
+			);
+			const optimizedObject =
+				xteinkByName.get(name);
+
+			return optimizedObject
+				? entryFromObject(
+					request,
+					env,
+					optimizedObject,
+					"books_xteink/",
+					"/download",
+				)
+				: entryFromObject(
+					request,
+					env,
+					originalObject,
+					"books/",
+					"/download",
+				);
+		})
 		.sort((a, b) =>
 			a.name.localeCompare(b.name),
 		);
@@ -199,6 +259,7 @@ async function manifest(
 			generated_at:
 				new Date().toISOString(),
 			books,
+			books_xteink,
 			wallpapers,
 			wallpapers_xteink,
 		},
@@ -439,7 +500,10 @@ export async function handleLibraryRoute(
 			return serveR2Object(
 				request,
 				env,
-				["books/"],
+				[
+					"books/",
+					"books_xteink/",
+				],
 			);
 
 		case "/wallpaper/download":
