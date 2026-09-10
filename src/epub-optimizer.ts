@@ -3,6 +3,8 @@ import {
 	unzipSync,
 	zipSync,
 } from "fflate";
+import { decode as decodePng } from "fast-png";
+import { encode as encodeJpeg } from "jpeg-js";
 
 import type {
 	Env,
@@ -19,12 +21,10 @@ export interface XteinkEpubOptimizationResult {
 
 const MAX_WIDTH = 480;
 const MAX_HEIGHT = 800;
-// The File Manager uses Canvas JPEG quality 0.85. Cloudflare Images' JPEG
-// encoder is materially more aggressive at the same numeric value, so 95 is
-// used here to preserve a similar visual result on the X4. Geometry and
-// grayscale settings still match the File Manager preset (480x800, no upscale).
+// Match CrossPoint File Manager's user-facing preset. Cloudflare Images is
+// now used only as a decoder/resizer; grayscale and JPEG encoding happen in
+// Worker code so Cloudflare's JPEG encoder can no longer over-compress images.
 const FILE_MANAGER_JPEG_QUALITY = 85;
-const CLOUDFLARE_JPEG_QUALITY = 95;
 
 const DEFENSIVE_STYLE =
 	'<style type="text/css">img,svg{max-width:100%;height:auto}body{overflow-wrap:break-word}table{max-width:100%;table-layout:fixed}pre,code{white-space:pre-wrap;word-wrap:break-word}*{box-sizing:border-box}</style>';
@@ -617,7 +617,91 @@ function syncNcxIdentifier(
 	);
 }
 
-async function convertImage(
+function clampByte(value: number): number {
+	return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function pngToFileManagerGrayscaleRgba(
+	pngBytes: Uint8Array,
+): {
+	data: Uint8Array;
+	width: number;
+	height: number;
+} {
+	const decoded = decodePng(pngBytes);
+
+	if (decoded.depth !== 8) {
+		throw new Error(
+			`Unexpected PNG bit depth ${decoded.depth}; expected 8-bit output`,
+		);
+	}
+
+	const source = decoded.data;
+	const channels = decoded.channels;
+	const pixelCount = decoded.width * decoded.height;
+	const rgba = new Uint8Array(pixelCount * 4);
+
+	for (let pixel = 0; pixel < pixelCount; pixel++) {
+		const inputOffset = pixel * channels;
+		const outputOffset = pixel * 4;
+
+		let r: number;
+		let g: number;
+		let b: number;
+		let a = 255;
+
+		switch (channels) {
+			case 1:
+				r = g = b = source[inputOffset];
+				break;
+			case 2:
+				r = g = b = source[inputOffset];
+				a = source[inputOffset + 1];
+				break;
+			case 3:
+				r = source[inputOffset];
+				g = source[inputOffset + 1];
+				b = source[inputOffset + 2];
+				break;
+			case 4:
+				r = source[inputOffset];
+				g = source[inputOffset + 1];
+				b = source[inputOffset + 2];
+				a = source[inputOffset + 3];
+				break;
+			default:
+				throw new Error(
+					`Unexpected PNG channel count ${channels}`,
+				);
+		}
+
+		// This is intentionally the same grayscale formula used by the
+		// CrossPoint File Manager converter. Transparent pixels are composited
+		// against white before luminance is calculated.
+		const alpha = a / 255;
+		const blendedR = r * alpha + 255 * (1 - alpha);
+		const blendedG = g * alpha + 255 * (1 - alpha);
+		const blendedB = b * alpha + 255 * (1 - alpha);
+		const gray = clampByte(
+			blendedR * 0.299 +
+				blendedG * 0.587 +
+				blendedB * 0.114,
+		);
+
+		rgba[outputOffset] = gray;
+		rgba[outputOffset + 1] = gray;
+		rgba[outputOffset + 2] = gray;
+		rgba[outputOffset + 3] = 255;
+	}
+
+	return {
+		data: rgba,
+		width: decoded.width,
+		height: decoded.height,
+	};
+}
+
+async function decodeAndResizeToPng(
 	env: Env,
 	bytes: Uint8Array,
 ): Promise<Uint8Array> {
@@ -635,13 +719,10 @@ async function convertImage(
 			width: MAX_WIDTH,
 			height: MAX_HEIGHT,
 			fit: "scale-down",
-			saturation: 0,
-			background: "#FFFFFF",
 			metadata: "none",
 		})
 		.output({
-			format: "image/jpeg",
-			quality: CLOUDFLARE_JPEG_QUALITY,
+			format: "image/png",
 			anim: false,
 		});
 
@@ -656,6 +737,32 @@ async function convertImage(
 	return new Uint8Array(
 		await response.arrayBuffer(),
 	);
+}
+
+async function convertImage(
+	env: Env,
+	bytes: Uint8Array,
+): Promise<Uint8Array> {
+	const png = await decodeAndResizeToPng(
+		env,
+		bytes,
+	);
+	const image = pngToFileManagerGrayscaleRgba(
+		png,
+	);
+
+	const encoded = encodeJpeg(
+		{
+			data: image.data,
+			width: image.width,
+			height: image.height,
+		},
+		FILE_MANAGER_JPEG_QUALITY,
+	);
+
+	// jpeg-js returns a Buffer under its CommonJS build. Copy to a plain
+	// Uint8Array before passing it back into the EPUB ZIP pipeline.
+	return Uint8Array.from(encoded.data);
 }
 
 export async function optimizeEpubForXteink(
@@ -712,7 +819,7 @@ export async function optimizeEpubForXteink(
 
 			console.log(
 				`[EPUB X4] ${path}: ${bytes.byteLength} -> ${converted.byteLength} bytes ` +
-					`(File Manager target ${FILE_MANAGER_JPEG_QUALITY}%, Cloudflare ${CLOUDFLARE_JPEG_QUALITY}%)`,
+					`(File Manager grayscale + Worker JPEG ${FILE_MANAGER_JPEG_QUALITY}%)`,
 			);
 
 			processedImages.set(

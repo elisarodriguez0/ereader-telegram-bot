@@ -7,6 +7,7 @@
 	"name": "soft-dawn-63ee",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-08-20",
+	"compatibility_flags": ["nodejs_compat"],
 	"observability": {
 		"enabled": true
 	},
@@ -34,19 +35,21 @@
 	 */
 	/**
 	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
+	 * databases, object storage, AI inference, real-time communication and more.
+	 * https://developers.cloudflare.com/workers/configuration/#environment-variables
 	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/#secrets
 	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
+	// "vars": { "MY_VARIABLE": "production_value" }
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
 	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
+	// "assets": { "directory": "./public/", "binding": "ASSETS" }
 	/**
 	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/
 	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
 }
