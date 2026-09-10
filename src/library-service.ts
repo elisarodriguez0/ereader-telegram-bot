@@ -9,7 +9,7 @@ interface ManifestEntry {
 	updated: string;
 	etag: string;
 	download_url: string;
-} 
+}
 
 function xmlEscape(
 	value: string,

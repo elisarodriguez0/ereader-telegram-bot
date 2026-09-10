@@ -19,7 +19,12 @@ export interface XteinkEpubOptimizationResult {
 
 const MAX_WIDTH = 480;
 const MAX_HEIGHT = 800;
-const JPEG_QUALITY = 85;
+// The File Manager uses Canvas JPEG quality 0.85. Cloudflare Images' JPEG
+// encoder is materially more aggressive at the same numeric value, so 95 is
+// used here to preserve a similar visual result on the X4. Geometry and
+// grayscale settings still match the File Manager preset (480x800, no upscale).
+const FILE_MANAGER_JPEG_QUALITY = 85;
+const CLOUDFLARE_JPEG_QUALITY = 95;
 
 const DEFENSIVE_STYLE =
 	'<style type="text/css">img,svg{max-width:100%;height:auto}body{overflow-wrap:break-word}table{max-width:100%;table-layout:fixed}pre,code{white-space:pre-wrap;word-wrap:break-word}*{box-sizing:border-box}</style>';
@@ -550,6 +555,68 @@ function ensureCoverMeta(
 	);
 }
 
+function extractMainIdentifier(opf: string): string | undefined {
+	const packageMatch = opf.match(
+		/<(?:[\w.-]+:)?package\b[^>]*\bunique-identifier=["']([^"']+)["'][^>]*>/i,
+	);
+
+	if (packageMatch?.[1]) {
+		const escapedId = packageMatch[1].replace(
+			/[.*+?^${}()|[\]\\]/g,
+			"\\$&",
+		);
+		const identifierMatch = opf.match(
+			new RegExp(
+				`<(?:[\\w.-]+:)?identifier\\b[^>]*\\bid=["']${escapedId}["'][^>]*>([^<]+)</(?:[\\w.-]+:)?identifier\\s*>`,
+				"i",
+			),
+		);
+		if (identifierMatch?.[1]?.trim()) {
+			return identifierMatch[1].trim();
+		}
+	}
+
+	return opf.match(
+		/<(?:[\w.-]+:)?identifier\b[^>]*>([^<]+)<\/(?:[\w.-]+:)?identifier\s*>/i,
+	)?.[1]?.trim();
+}
+
+function escapeXmlAttribute(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+function syncNcxIdentifier(
+	content: string,
+	identifier: string | undefined,
+): string {
+	if (!identifier) return content;
+
+	const escaped = escapeXmlAttribute(identifier);
+	const dtbUid = /<(?:[\w.-]+:)?meta\b(?=[^>]*\bname\s*=\s*["']dtb:uid["'])[^>]*\/?\s*>/i;
+	if (!dtbUid.test(content)) return content;
+
+	return content.replace(
+		dtbUid,
+		(tag) => {
+			if (/\bcontent\s*=/i.test(tag)) {
+				return tag.replace(
+					/(\bcontent\s*=\s*["'])[^"']*(["'])/i,
+					`$1${escaped}$2`,
+				);
+			}
+
+			return tag.replace(
+				/\s*\/?>$/,
+				(match) => ` content="${escaped}"${match}`,
+			);
+		},
+	);
+}
+
 async function convertImage(
 	env: Env,
 	bytes: Uint8Array,
@@ -574,7 +641,7 @@ async function convertImage(
 		})
 		.output({
 			format: "image/jpeg",
-			quality: JPEG_QUALITY,
+			quality: CLOUDFLARE_JPEG_QUALITY,
 			anim: false,
 		});
 
@@ -597,6 +664,9 @@ export async function optimizeEpubForXteink(
 ): Promise<XteinkEpubOptimizationResult> {
 	const files = unzipSync(inputBytes);
 	const opfPath = findOpfPath(files);
+	const mainIdentifier = extractMainIdentifier(
+		readText(files[opfPath]),
+	);
 	const renamed = new Map<string, string>();
 	const processedImages = new Map<string, Uint8Array>();
 	let optimizedImages = 0;
@@ -638,6 +708,11 @@ export async function optimizeEpubForXteink(
 			const converted = await convertImage(
 				env,
 				bytes,
+			);
+
+			console.log(
+				`[EPUB X4] ${path}: ${bytes.byteLength} -> ${converted.byteLength} bytes ` +
+					`(File Manager target ${FILE_MANAGER_JPEG_QUALITY}%, Cloudflare ${CLOUDFLARE_JPEG_QUALITY}%)`,
 			);
 
 			processedImages.set(
@@ -724,8 +799,22 @@ export async function optimizeEpubForXteink(
 			continue;
 		}
 
+		if (lower.endsWith(".ncx")) {
+			const rewritten = rewriteAttributeReferences(
+				readText(bytes),
+				path,
+				renamed,
+			);
+			outputFiles[path] = strToU8(
+				syncNcxIdentifier(
+					rewritten,
+					mainIdentifier,
+				),
+			);
+			continue;
+		}
+
 		if (
-			lower.endsWith(".ncx") ||
 			lower.endsWith(".xml") ||
 			lower.endsWith(".svg")
 		) {
