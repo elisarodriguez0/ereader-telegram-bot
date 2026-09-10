@@ -13,6 +13,7 @@ import {
 import {
 	isMeaningful,
 	parseStructuredSeriesTitle,
+	stripEditionNoise,
 } from "./metadata/normalize";
 
 import type {
@@ -67,30 +68,6 @@ function truncateUnicode(
 		.replace(/[. -]+$/g, "");
 }
 
-/*
- * Provider catalogues sometimes append edition labels to the display title:
- *   Wild Love (Standard Edition)
- *   Book Name (Deluxe Edition)
- *
- * Those labels are useful metadata, but they make filename-based sync brittle.
- * Remove only an explicit trailing edition marker; do not strip arbitrary
- * parenthetical subtitles.
- */
-function stripTrailingEditionLabel(
-	value: string,
-): string {
-	return value
-		.replace(
-			/\s*[([]\s*(?:(?:standard|special|deluxe|collector(?:'s)?|collectors?|international|anniversary|movie\s+tie[- ]?in|illustrated|limited|signed)\s+)?edition\s*[)\]]\s*$/i,
-			"",
-		)
-		.replace(
-			/\s*[([]\s*(?:(?:edici[oó]n)\s+(?:est[aá]ndar|especial|de\s+lujo|coleccionista|ilustrada|limitada))\s*[)\]]\s*$/i,
-			"",
-		)
-		.trim();
-}
-
 function canonicalTitle(
 	metadata: BookMetadata,
 ): string | undefined {
@@ -109,9 +86,9 @@ function canonicalTitle(
 
 	const cleaned =
 		sanitizeFilePart(
-			stripTrailingEditionLabel(
+			stripEditionNoise(
 				rawTitle,
-			),
+			) ?? rawTitle,
 		);
 
 	return cleaned || undefined;
@@ -253,6 +230,7 @@ function formatSourceList(
 	}
 
 	const order: MetadataSource[] = [
+		"goodreads",
 		"lectulandia",
 		"google-books",
 		"open-library",

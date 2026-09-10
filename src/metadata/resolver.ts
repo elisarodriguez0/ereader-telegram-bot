@@ -5,12 +5,17 @@ import {
 	mergeSubjects,
 	normalizeIsbn,
 	parseStructuredSeriesTitle,
+	stripEditionNoise,
 	titleSimilarity,
 } from "./normalize";
 
 import {
 	parseFileName,
 } from "./filename";
+
+import {
+	lookupGoodreads,
+} from "./providers/goodreads";
 
 import {
 	lookupGoogleBooks,
@@ -32,6 +37,70 @@ import type {
 	ResolvedMetadata,
 	SearchHypothesis,
 } from "./types";
+
+const PREFERRED_LANGUAGE = "es";
+
+function isSpanishLanguage(value?: string): boolean {
+	if (!value) {
+		return false;
+	}
+
+	const normalized = value
+		.toLowerCase()
+		.replace(/^\/languages\//, "")
+		.trim();
+
+	return (
+		normalized === "es" ||
+		normalized === "es-es" ||
+		normalized === "spa"
+	);
+}
+
+function looksSpanishText(value?: string): boolean {
+	if (!value) {
+		return false;
+	}
+
+	const text = ` ${value.toLowerCase()} `;
+
+	if (/[áéíóúñ¿¡]/i.test(value)) {
+		return true;
+	}
+
+	const markers = [
+		" el ", " la ", " los ", " las ", " un ", " una ",
+		" de ", " del ", " que ", " y ", " para ", " con ",
+		" por ", " su ", " sus ", " se ", " en ", " como ",
+		" cuando ", " pero ", " más ", " amor ", " vida ",
+	];
+
+	let hits = 0;
+	for (const marker of markers) {
+		if (text.includes(marker)) {
+			hits++;
+		}
+	}
+
+	return hits >= 3;
+}
+
+function spanishSafeDescription(
+	value: string | undefined,
+	source: MetadataSource,
+): string | undefined {
+	if (!value) {
+		return undefined;
+	}
+
+	if (source === "lectulandia") {
+		return value;
+	}
+
+	return looksSpanishText(value)
+		? value
+		: undefined;
+}
 
 function setField<
 	K extends keyof BookMetadata,
@@ -76,6 +145,11 @@ function canonicalizeCandidate(
 	const metadata = {
 		...candidate.metadata,
 	};
+
+	metadata.title =
+		stripEditionNoise(
+			metadata.title,
+		);
 
 	/*
 	 * Some catalogues encode series + position
@@ -216,7 +290,7 @@ function buildIdentityHypotheses(
 			hints: {
 				isbn,
 				language:
-					existing.language,
+					PREFERRED_LANGUAGE,
 			},
 		});
 	}
@@ -248,7 +322,7 @@ function buildIdentityHypotheses(
 						? existing.author
 						: undefined,
 				language:
-					existing.language,
+					PREFERRED_LANGUAGE,
 			},
 		});
 	}
@@ -264,11 +338,7 @@ function buildIdentityHypotheses(
 				...hypothesis.hints,
 
 				language:
-					hypothesis
-						.hints
-						.language ??
-					existing
-						.language,
+					PREFERRED_LANGUAGE,
 			},
 		});
 	}
@@ -909,9 +979,8 @@ function addExistingMetadata(
 	}
 
 	if (
-		isMeaningful(
-			existing.description,
-		)
+		isMeaningful(existing.description) &&
+		looksSpanishText(existing.description)
 	) {
 		setField(
 			result,
@@ -922,19 +991,6 @@ function addExistingMetadata(
 		);
 	}
 
-	if (
-		isMeaningful(
-			existing.language,
-		)
-	) {
-		setField(
-			result,
-			sources,
-			"language",
-			existing.language,
-			"epub",
-		);
-	}
 
 	if (
 		normalizeIsbn(
@@ -1021,17 +1077,28 @@ function addExistingMetadata(
 		);
 	}
 
-	if (
-		existing.subjects
-			?.length
-	) {
-		setField(
-			result,
-			sources,
-			"subjects",
-			existing.subjects,
-			"epub",
-		);
+	if (existing.subjects?.length) {
+		const spanishSubjects = existing.subjects.filter((subject) => {
+			const normalized = subject.toLowerCase().trim();
+			return (
+				/[áéíóúñ]/i.test(subject) ||
+				[
+					"ficción", "novela", "fantástico", "fantasía",
+					"romance", "juvenil", "intriga", "terror",
+					"misterio", "aventura", "aventuras",
+				].includes(normalized)
+			);
+		});
+
+		if (spanishSubjects.length) {
+			setField(
+				result,
+				sources,
+				"subjects",
+				spanishSubjects,
+				"epub",
+			);
+		}
 	}
 }
 
@@ -1151,7 +1218,10 @@ function applyIdentityCandidate(
 			result,
 			sources,
 			"description",
-			metadata.description,
+			spanishSafeDescription(
+				metadata.description,
+				identity.source,
+			),
 			identity.source,
 			identityChanged,
 		);
@@ -1381,41 +1451,75 @@ function applyBibliographicEnrichment(
 		);
 	}
 
-	if (!result.language) {
-		setField(
-			result,
-			sources,
-			"language",
-			metadata.language,
-			candidate.source,
-		);
-	}
 
-	if (
-		!result.description &&
-		metadata.description
-	) {
+	const candidateDescription = spanishSafeDescription(
+		metadata.description,
+		candidate.source,
+	);
+
+	if (!result.description && candidateDescription) {
 		setField(
 			result,
 			sources,
 			"description",
-			metadata.description,
+			candidateDescription,
 			candidate.source,
 		);
 	}
 
-	if (
-		!result.subjects
-			?.length &&
-		metadata.subjects
-			?.length
-	) {
+}
+
+function applyGoodreadsEnrichment(
+	result: BookMetadata,
+	sources: ResolvedMetadata["sources"],
+	candidate: MetadataCandidate,
+): void {
+	const metadata = candidate.metadata;
+
+	/*
+	 * Goodreads is particularly valuable for work-level taxonomy. Keep its
+	 * genre/shelf order first, then retain useful tags from other providers.
+	 */
+	if (metadata.subjects?.length) {
+		result.subjects = mergeSubjects(
+			metadata.subjects,
+			result.subjects,
+		);
+		sources.subjects = "goodreads";
+	}
+
+	if (metadata.series && !result.series) {
 		setField(
 			result,
 			sources,
-			"subjects",
-			metadata.subjects,
-			candidate.source,
+			"series",
+			metadata.series,
+			"goodreads",
+		);
+	}
+
+	if (metadata.seriesIndex && !result.seriesIndex) {
+		setField(
+			result,
+			sources,
+			"seriesIndex",
+			metadata.seriesIndex,
+			"goodreads",
+		);
+	}
+
+	const description = spanishSafeDescription(
+		metadata.description,
+		"goodreads",
+	);
+
+	if (!result.description && description) {
+		setField(
+			result,
+			sources,
+			"description",
+			description,
+			"goodreads",
 		);
 	}
 }
@@ -1425,6 +1529,13 @@ function isbnCandidateCompatible(
 	candidate: MetadataCandidate,
 ): boolean {
 	const metadata = candidate.metadata;
+
+	if (
+		metadata.language &&
+		!isSpanishLanguage(metadata.language)
+	) {
+		return false;
+	}
 
 	if (
 		current.author &&
@@ -1598,16 +1709,6 @@ function applyExactEditionCandidate(
 			);
 		}
 
-		if (metadata.language) {
-			setField(
-				result,
-				sources,
-				"language",
-				metadata.language,
-				candidate.source,
-				true,
-			);
-		}
 	} else {
 		setField(
 			result,
@@ -1648,13 +1749,6 @@ function applyExactEditionCandidate(
 			candidate.source,
 		);
 
-		setField(
-			result,
-			sources,
-			"language",
-			metadata.language,
-			candidate.source,
-		);
 	}
 
 	/*
@@ -1683,8 +1777,13 @@ function applyExactEditionCandidate(
 		);
 	}
 
+	const exactDescription = spanishSafeDescription(
+		metadata.description,
+		candidate.source,
+	);
+
 	if (
-		metadata.description &&
+		exactDescription &&
 		sources.description !== "lectulandia" &&
 		(!result.description || primary)
 	) {
@@ -1692,24 +1791,10 @@ function applyExactEditionCandidate(
 			result,
 			sources,
 			"description",
-			metadata.description,
+			exactDescription,
 			candidate.source,
 			primary,
 		);
-	}
-
-	if (
-		metadata.subjects?.length &&
-		(!result.subjects?.length || primary)
-	) {
-		result.subjects = mergeSubjects(
-			result.subjects,
-			metadata.subjects,
-		);
-
-		if (!sources.subjects || primary) {
-			sources.subjects = candidate.source;
-		}
 	}
 }
 
@@ -1724,12 +1809,15 @@ async function lookupExactIsbnCandidates(
 		confidence: 1,
 		hints: {
 			isbn,
-			language: current.language,
+			language: PREFERRED_LANGUAGE,
 		},
 	};
 
-	const [rawGoogle, rawOpenLibrary] =
+	const [rawGoodreads, rawGoogle, rawOpenLibrary] =
 		await Promise.all([
+			lookupGoodreads(
+				hypothesis,
+			),
 			lookupGoogleBooks(
 				hypothesis,
 				options.googleBooksApiKey,
@@ -1739,7 +1827,7 @@ async function lookupExactIsbnCandidates(
 			),
 		]);
 
-	return [rawGoogle, rawOpenLibrary]
+	return [rawGoodreads, rawGoogle, rawOpenLibrary]
 		.map(canonicalizeCandidate)
 		.filter(
 			(
@@ -1772,7 +1860,7 @@ async function lookupFinalLectulandia(
 		hints: {
 			title: result.title,
 			author: result.author,
-			language: result.language,
+			language: PREFERRED_LANGUAGE,
 		},
 	};
 
@@ -1799,9 +1887,19 @@ export async function resolveMetadata(
 	options:
 		MetadataResolverOptions = {},
 ): Promise<ResolvedMetadata> {
+	/*
+	 * Retailer/catalogue suffixes such as "(Spanish Edition)" are not part
+	 * of the book title. Remove them before any provider search and keep the
+	 * original object only for repairedFields comparison.
+	 */
+	const normalizedExisting: BookMetadata = {
+		...existing,
+		title: stripEditionNoise(existing.title),
+	};
+
 	const hypotheses =
 		buildIdentityHypotheses(
-			existing,
+			normalizedExisting,
 			originalFileName,
 		);
 
@@ -1854,7 +1952,7 @@ export async function resolveMetadata(
 	addExistingMetadata(
 		result,
 		sources,
-		existing,
+		normalizedExisting,
 	);
 
 	/*
@@ -1918,6 +2016,10 @@ export async function resolveMetadata(
 	 * and only THEN be sent to Google
 	 * Books / Open Library.
 	 */
+	let goodreadsEnrichment:
+		| MetadataCandidate
+		| undefined;
+
 	let googleEnrichment:
 		| MetadataCandidate
 		| undefined;
@@ -1954,14 +2056,19 @@ export async function resolveMetadata(
 							: undefined,
 
 					language:
-						result.language,
+						PREFERRED_LANGUAGE,
 				},
 			};
 
 		const [
+			rawGoodreadsEnrichment,
 			rawGoogleEnrichment,
 			rawOpenLibraryEnrichment,
 		] = await Promise.all([
+			lookupGoodreads(
+				canonical,
+			),
+
 			lookupGoogleBooks(
 				canonical,
 				options
@@ -1973,6 +2080,11 @@ export async function resolveMetadata(
 			),
 		]);
 
+		goodreadsEnrichment =
+			canonicalizeCandidate(
+				rawGoodreadsEnrichment,
+			);
+
 		googleEnrichment =
 			canonicalizeCandidate(
 				rawGoogleEnrichment,
@@ -1982,6 +2094,25 @@ export async function resolveMetadata(
 			canonicalizeCandidate(
 				rawOpenLibraryEnrichment,
 			);
+
+		if (
+			enrichmentAccepted(
+				goodreadsEnrichment,
+			)
+		) {
+			applyBibliographicEnrichment(
+				result,
+				sources,
+				goodreadsEnrichment,
+				identityChanged,
+				false,
+			);
+			applyGoodreadsEnrichment(
+				result,
+				sources,
+				goodreadsEnrichment,
+			);
+		}
 
 		if (
 			enrichmentAccepted(
@@ -2035,6 +2166,9 @@ export async function resolveMetadata(
 			result,
 			[
 				...identityCandidates,
+				...(goodreadsEnrichment
+					? [goodreadsEnrichment]
+					: []),
 				...(googleEnrichment
 					? [googleEnrichment]
 					: []),
@@ -2057,23 +2191,22 @@ export async function resolveMetadata(
 
 		if (exactIsbnCandidates.length > 0) {
 			/*
-			 * Google Books is preferred as the primary exact
-			 * edition source when both APIs confirm the ISBN;
-			 * Open Library then fills remaining holes.
+			 * For an exact Spanish ISBN, Goodreads is the preferred edition
+			 * record because it tends to expose publisher/pages/series together.
+			 * Google Books and Open Library remain independent fallbacks.
 			 */
-			const orderedExact = [
-				...exactIsbnCandidates.filter(
-					(candidate) =>
-						candidate.source ===
-						"google-books",
-				),
-				...exactIsbnCandidates.filter(
-					(candidate) =>
-						candidate.source !==
-						"google-books",
-				),
-			];
+			const exactRank: Partial<Record<MetadataSource, number>> = {
+				goodreads: 3,
+				"google-books": 2,
+				"open-library": 1,
+			};
 
+			const orderedExact = [...exactIsbnCandidates]
+				.sort(
+					(a, b) =>
+						(exactRank[b.source] ?? 0) -
+						(exactRank[a.source] ?? 0),
+				);
 			orderedExact.forEach(
 				(candidate, index) => {
 					applyExactEditionCandidate(
@@ -2159,10 +2292,49 @@ export async function resolveMetadata(
 		}
 	}
 
+	/*
+	 * Goodreads taxonomy wins the ordering of genre/tag metadata. Prefer an
+	 * exact-ISBN Goodreads result when available, otherwise canonical lookup.
+	 */
+	const finalGoodreads =
+		exactIsbnCandidates.find(
+			(candidate) =>
+				candidate.source === "goodreads",
+		) ??
+		goodreadsEnrichment;
+
+	if (
+		finalGoodreads &&
+		enrichmentAccepted(finalGoodreads)
+	) {
+		applyGoodreadsEnrichment(
+			result,
+			sources,
+			finalGoodreads,
+		);
+	}
+
 	result.subjects =
 		mergeSubjects(
 			result.subjects,
 		);
+
+	const cleanedResolvedTitle =
+		stripEditionNoise(
+			result.title,
+		);
+
+	if (cleanedResolvedTitle) {
+		result.title = cleanedResolvedTitle;
+	}
+
+	/*
+	 * Project rule: all Telegram EPUBs are Spanish editions.
+	 * The visible title may legitimately stay in English, but
+	 * dc:language must be Spanish and English catalogue data
+	 * must never override a Spanish edition.
+	 */
+	result.language = PREFERRED_LANGUAGE;
 
 	const repairedFields:
 		string[] = [];
@@ -2235,6 +2407,10 @@ export async function resolveMetadata(
 		matches:
 			deduplicateMatches([
 				...identityCandidates,
+
+				...(goodreadsEnrichment
+					? [goodreadsEnrichment]
+					: []),
 
 				...(googleEnrichment
 					? [googleEnrichment]

@@ -2,6 +2,7 @@ export type MetadataSource =
 	| "epub"
 	| "filename"
 	| "lectulandia"
+	| "goodreads"
 	| "google-books"
 	| "open-library";
 

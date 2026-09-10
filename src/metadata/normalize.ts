@@ -88,6 +88,65 @@ export function cleanText(
 	return clean || undefined;
 }
 
+/**
+ * Remove catalogue/retailer edition labels from a title without touching
+ * genuine subtitles or series information. This intentionally targets only
+ * an explicit trailing "edition / edición" marker.
+ *
+ * Examples:
+ *   Starside (Spanish Edition) -> Starside
+ *   Starside [Kindle Edition] -> Starside
+ *   Starside - Edición española -> Starside
+ */
+export function stripEditionNoise(
+	value?: string,
+): string | undefined {
+	const initial = cleanText(value);
+
+	if (!initial) {
+		return undefined;
+	}
+
+	let clean: string = initial;
+
+	/*
+	 * Repeat because retailer metadata can stack suffixes, e.g.
+	 * "Book (Spanish Edition) (Kindle Edition)".
+	 */
+	for (let pass = 0; pass < 3; pass++) {
+		const previous: string = clean;
+
+		clean = clean
+			.replace(
+				/\s*[([]\s*[^)\]]*\b(?:edition|edici[oó]n)\b[^)\]]*[)\]]\s*$/i,
+				"",
+			)
+			.replace(
+				/\s*[-–—:|]\s*(?:(?:spanish|english|kindle|ebook|e-book|paperback|hardcover|hardback|standard|special|deluxe|collector(?:'s)?|collectors?|international|anniversary|movie\s+tie[- ]?in|illustrated|limited|signed|first|second|revised|updated)\s+)*edition\s*$/i,
+				"",
+			)
+			.replace(
+				/\s+(?:spanish|english|kindle|ebook|e-book|paperback|hardcover|hardback)\s+edition\s*$/i,
+				"",
+			)
+			.replace(
+				/\s*[-–—:|]\s*edici[oó]n(?:\s+(?:(?:en\s+)?(?:espa[nñ]ol(?:a)?|ingl[eé]s)|est[aá]ndar|especial|de\s+lujo|coleccionista|internacional|aniversario|ilustrada|limitada|firmada|revisada|actualizada|kindle|digital))*\s*$/i,
+				"",
+			)
+			.replace(
+				/\s+edici[oó]n\s+(?:(?:en\s+)?espa[nñ]ol(?:a)?|kindle|digital)\s*$/i,
+				"",
+			)
+			.trim();
+
+		if (clean === previous) {
+			break;
+		}
+	}
+
+	return cleanText(clean);
+}
+
 export function normalizeText(
 	value?: string,
 ): string {
