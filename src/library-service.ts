@@ -169,11 +169,7 @@ async function manifest(
 			a.name.localeCompare(b.name),
 		);
 
-	/*
-	 * X4 gets an optimized variant when one exists, but the list stays complete
-	 * for books uploaded before this feature. Both variants intentionally keep
-	 * the exact same basename for KOReader filename-based progress sync.
-	 */
+	/* Use X4 optimized variant when available, preserving basename for KOReader sync. */
 	const xteinkByName = new Map(
 		xteinkBookObjects
 			.filter((object) =>

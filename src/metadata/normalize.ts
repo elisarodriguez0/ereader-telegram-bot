@@ -89,14 +89,9 @@ export function cleanText(
 }
 
 /**
- * Remove catalogue/retailer edition labels from a title without touching
- * genuine subtitles or series information. This intentionally targets only
- * an explicit trailing "edition / edición" marker.
- *
- * Examples:
- *   Starside (Spanish Edition) -> Starside
- *   Starside [Kindle Edition] -> Starside
- *   Starside - Edición española -> Starside
+ * Remove retailer edition labels and language/format suffixes from titles,
+ * preserving genuine subtitles and series information. Targets only explicit
+ * trailing markers: (Edition), [Kindle Edition], or - Edition variants.
  */
 export function stripEditionNoise(
 	value?: string,
@@ -109,10 +104,7 @@ export function stripEditionNoise(
 
 	let clean: string = initial;
 
-	/*
-	 * Repeat because retailer metadata can stack suffixes, e.g.
-	 * "Book (Spanish Edition) (Kindle Edition)".
-	 */
+	/* Handle stacked edition suffixes from retailer metadata. */
 	for (let pass = 0; pass < 3; pass++) {
 		const previous: string = clean;
 
@@ -147,6 +139,10 @@ export function stripEditionNoise(
 	return cleanText(clean);
 }
 
+/**
+ * Normalize text to NFD form, remove diacritics, lowercase, and collapse
+ * whitespace. Used for fuzzy matching and deduplication.
+ */
 export function normalizeText(
 	value?: string,
 ): string {
@@ -159,6 +155,10 @@ export function normalizeText(
 		.replace(/\s+/g, " ");
 }
 
+/**
+ * Validate that a string is meaningful (non-empty, not in blacklist,
+ * contains actual content after normalization).
+ */
 export function isMeaningful(
 	value?: string,
 ): boolean {

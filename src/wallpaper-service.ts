@@ -107,6 +107,10 @@ function mimeFromExtension(
 	}
 }
 
+/**
+ * Retrieve all objects from R2 bucket with optional prefix.
+ * Handles pagination transparently using cursor.
+ */
 async function listAllObjects(
 	env: Env,
 	prefix: string,
@@ -286,11 +290,9 @@ async function getOriginal(
 	return object;
 }
 
-/*
- * Kindle Paperwhite 5
- *
- * Final format is already usable directly by
- * the Kindle screensaver directory.
+/**
+ * Prepare a wallpaper image for Kindle Paperwhite 5.
+ * Output is formatted directly for Kindle screensaver directory integration.
  */
 export async function prepareKindleWallpaper(
 	env: Env,
@@ -390,19 +392,10 @@ export async function prepareKindleWallpaper(
 	return key;
 }
 
-/*
- * Xteink X4 / VCodex
- *
- * VCodex's own documentation recommends custom sleep images as:
- *
- * - 480 x 800 pixels on X4
- * - uncompressed BMP
- * - 24-bit color depth
- *
- * Do not pre-quantize or dither the image here. VCodex already knows how
- * to render a 24-bit BMP to the X4's native grayscale when the sleep screen
- * is displayed. The Worker only prepares the pixels and wraps them in a
- * standard 24-bit BI_RGB BMP.
+/**
+ * Prepare a wallpaper image for Xteink X4 / VCodex.
+ * Generates a 480x800 uncompressed 24-bit BMP. VCodex handles grayscale
+ * rendering and quantization for the native display.
  */
 function makeBmp24(
 	rgb: Uint8Array,
@@ -443,9 +436,9 @@ function makeBmp24(
 			bmp.buffer,
 		);
 
-	// BITMAPFILEHEADER
-	bmp[0] = 0x42; // B
-	bmp[1] = 0x4d; // M
+	/* BITMAPFILEHEADER: BM signature + metadata */
+	bmp[0] = 0x42;
+	bmp[1] = 0x4d;
 	view.setUint32(
 		2,
 		fileBytes,
@@ -457,7 +450,7 @@ function makeBmp24(
 		true,
 	);
 
-	// BITMAPINFOHEADER
+	/* BITMAPINFOHEADER */
 	view.setUint32(
 		14,
 		40,
@@ -469,8 +462,7 @@ function makeBmp24(
 		true,
 	);
 
-	// Negative height means top-down row order. Cloudflare's raw RGB output
-	// is top-down, and VCodex's Bitmap reader explicitly supports this form.
+	/* Negative height for top-down row order (VCodex Bitmap reader format). */
 	view.setInt32(
 		22,
 		-height,
@@ -480,17 +472,17 @@ function makeBmp24(
 		26,
 		1,
 		true,
-	); // planes
+	);
 	view.setUint16(
 		28,
 		24,
 		true,
-	); // bits per pixel
+	);
 	view.setUint32(
 		30,
 		0,
 		true,
-	); // BI_RGB = uncompressed
+	);
 	view.setUint32(
 		34,
 		pixelBytes,
@@ -520,7 +512,7 @@ function makeBmp24(
 			const target =
 				targetRow + x * 3;
 
-			// Cloudflare outputs RGB. BMP stores 24-bit pixels as BGR.
+			/* Convert Cloudflare RGB output to BMP BGR format. */
 			bmp[target] =
 				rgb[source + 2];
 			bmp[target + 1] =

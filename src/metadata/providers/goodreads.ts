@@ -112,6 +112,9 @@ const GENRE_TRANSLATIONS: Record<string, string> = {
 	"young adult": "Juvenil",
 };
 
+/**
+ * Safe object accessor: return value only if it is a plain object.
+ */
 function asObject(value: unknown): JsonObject | undefined {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? value as JsonObject
@@ -198,11 +201,7 @@ function translateGenre(value?: string): string | undefined {
 		return undefined;
 	}
 
-	/*
-	 * Keep romance/story tropes in their usual English form.
-	 * They are community labels rather than genres to localize, and
-	 * translating them makes the metadata less useful for filtering.
-	 */
+	/* Keep romance/fiction tropes in English (community labels, not localized genres). */
 	const trope = TROPE_LABELS[normalized];
 	if (trope) {
 		return trope;
@@ -431,7 +430,7 @@ function metadataFromJsonLd(
 				};
 			}
 		} catch {
-			// Try the next JSON-LD block.
+			/* Continue with the next JSON-LD block. */
 		}
 	}
 

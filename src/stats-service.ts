@@ -38,6 +38,9 @@ export interface KindleStatsSnapshot {
 	days: KindleStatsDay[];
 }
 
+/**
+ * Validate authorization via query token or Bearer token in Authorization header.
+ */
 function authorized(
 	request: Request,
 	env: Env,
@@ -69,6 +72,9 @@ function unauthorized(): Response {
 	);
 }
 
+/**
+ * Create an empty Kindle stats snapshot structure.
+ */
 function emptySnapshot(): KindleStatsSnapshot {
 	return {
 		schema_version: 1,
@@ -79,6 +85,9 @@ function emptySnapshot(): KindleStatsSnapshot {
 	};
 }
 
+/**
+ * Type guard: check if value is a plain object (not array or null).
+ */
 function isPlainObject(
 	value: unknown,
 ): value is Record<string, unknown> {
@@ -392,7 +401,7 @@ function normalizeSnapshot(
 			continue;
 		}
 
-		/* Cumulative values: duplicates keep the highest value, never sum. */
+		/* For duplicate days, retain highest values (do not sum). */
 		current.reading_seconds = Math.max(current.reading_seconds, readingSeconds);
 		current.sessions = Math.max(current.sessions, sessions);
 

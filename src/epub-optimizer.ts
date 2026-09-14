@@ -21,9 +21,11 @@ export interface XteinkEpubOptimizationResult {
 
 const MAX_WIDTH = 480;
 const MAX_HEIGHT = 800;
-// Match CrossPoint File Manager's user-facing preset. Cloudflare Images is
-// now used only as a decoder/resizer; grayscale and JPEG encoding happen in
-// Worker code so Cloudflare's JPEG encoder can no longer over-compress images.
+/**
+ * JPEG quality preset to match CrossPoint File Manager's user-facing settings.
+ * Cloudflare Images provides only decoding/resizing; grayscale and JPEG encoding
+ * occur in Worker code to prevent over-compression.
+ */
 const FILE_MANAGER_JPEG_QUALITY = 85;
 
 const DEFENSIVE_STYLE =
@@ -338,7 +340,7 @@ function readText(
 			{ fatal: true, ignoreBOM: false },
 		).decode(data);
 	} catch {
-		/* Continue with the declared charset. */
+		/* UTF-8 decode failed; fall back to declared charset. */
 	}
 
 	const header = new TextDecoder(
@@ -675,9 +677,8 @@ function pngToFileManagerGrayscaleRgba(
 				);
 		}
 
-		// This is intentionally the same grayscale formula used by the
-		// CrossPoint File Manager converter. Transparent pixels are composited
-		// against white before luminance is calculated.
+		// Luminance conversion matches CrossPoint File Manager's grayscale formula.
+		// Transparent pixels are composited against white before conversion.
 		const alpha = a / 255;
 		const blendedR = r * alpha + 255 * (1 - alpha);
 		const blendedG = g * alpha + 255 * (1 - alpha);
@@ -760,8 +761,7 @@ async function convertImage(
 		FILE_MANAGER_JPEG_QUALITY,
 	);
 
-	// jpeg-js returns a Buffer under its CommonJS build. Copy to a plain
-	// Uint8Array before passing it back into the EPUB ZIP pipeline.
+	/* Convert Buffer to Uint8Array for ZIP pipeline compatibility. */
 	return Uint8Array.from(encoded.data);
 }
 

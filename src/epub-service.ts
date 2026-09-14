@@ -34,9 +34,9 @@ export interface StoredEpubResult {
 
 const MAX_CANONICAL_BASENAME_LENGTH = 180;
 
-/*
- * Keep filenames friendly to FAT/exFAT, Kindle, KOReader and CrossInk.
- * We preserve accents, apostrophes and normal Unicode text.
+/**
+ * Sanitize a filename component to be compatible with FAT/exFAT, Kindle,
+ * KOReader, and CrossInk. Preserves accents, apostrophes, and Unicode text.
  */
 function sanitizeFilePart(
 	value: string,
@@ -67,14 +67,10 @@ function truncateUnicode(
 		.replace(/[. -]+$/g, "");
 }
 
-/*
- * Provider catalogues sometimes append edition labels to the display title:
- *   Wild Love (Standard Edition)
- *   Book Name (Deluxe Edition)
- *
- * Those labels are useful metadata, but they make filename-based sync brittle.
- * Remove only an explicit trailing edition marker; do not strip arbitrary
- * parenthetical subtitles.
+/**
+ * Strip retailer edition labels from book titles while keeping genuine
+ * subtitles and series information intact. Only removes explicit trailing
+ * markers such as "(Standard Edition)" or "[Kindle Edition]".
  */
 function stripTrailingEditionLabel(
 	value: string,
@@ -148,6 +144,10 @@ function fallbackBaseName(
 	);
 }
 
+/**
+ * Build a canonical EPUB filename from metadata and original filename.
+ * Enforces conservative limits for cross-device compatibility (Kindle, X4).
+ */
 export function buildCanonicalEpubFileName(
 	metadata: BookMetadata,
 	originalFileName: string,
@@ -170,12 +170,7 @@ export function buildCanonicalEpubFileName(
 			? ` - ${author}`
 			: "";
 
-	/*
-	 * Keep the whole basename below a conservative limit while preserving
-	 * the author suffix whenever possible. This makes the filename stable
-	 * across the Kindle and X4 instead of letting either device truncate it
-	 * differently.
-	 */
+	/* Keep filename length conservative and consistent across devices. */
 	const maxTitleLength =
 		Math.max(
 			30,
@@ -201,18 +196,14 @@ export function buildCanonicalEpubFileName(
 	};
 }
 
-/*
- * Retained as a generic fallback/helper for callers that may still import it.
- * New EPUB uploads use buildCanonicalEpubFileName() after metadata repair.
+/**
+ * Fallback filename generator for cases where metadata repair has not occurred.
+ * Used as a metadata search hint before determining real title/author.
  */
 export function safeFileName(
 	fileName: string,
 ): string {
-	/*
-	 * This version is intentionally light-touch because it is used as a
-	 * metadata-search hint before we know the real title/author. Preserve
-	 * punctuation such as colons and question marks when possible.
-	 */
+	/* Use light-touch sanitization to preserve punctuation for search hints. */
 	const clean = fileName
 		.replace(/[\\/\0]/g, "_")
 		.replace(/[\u0001-\u001f\u007f]/g, "")
