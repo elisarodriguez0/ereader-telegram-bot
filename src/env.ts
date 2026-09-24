@@ -1,3 +1,7 @@
+import type {
+	EpubQueueJob,
+} from "./jobs";
+
 export interface Env {
 	TELEGRAM_BOT_TOKEN: string;
 	TELEGRAM_ALLOWED_USER_ID: string;
@@ -7,9 +11,11 @@ export interface Env {
 	LECTULANDIA_BASE_URL?: string;
 
 	/*
-	 * Kept as structural runtime bindings instead of importing
-	 * generated Wrangler types, so src stays self-contained.
+	 * Structural runtime bindings.
+	 * EPUB optimization uses external EPUBKit.
+	 * Cloudflare Images remains required by wallpaper-service.ts.
 	 */
-	EREADER_BUCKET: any;
-	IMAGES: any;
+	EREADER_BUCKET: R2Bucket;
+	EPUB_QUEUE: Queue<EpubQueueJob>;
+	IMAGES: ImagesBinding;
 }

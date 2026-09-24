@@ -7,8 +7,8 @@ import {
 } from "./metadata/epub";
 
 import {
-	optimizeEpubForXteink,
-} from "./epub-optimizer";
+	optimizeEpubWithEpubKit,
+} from "./epubkit";
 
 import {
 	isMeaningful,
@@ -34,17 +34,22 @@ export interface StoredEpubResult {
 
 const MAX_CANONICAL_BASENAME_LENGTH = 180;
 
-/**
- * Sanitize a filename component to be compatible with FAT/exFAT, Kindle,
- * KOReader, and CrossInk. Preserves accents, apostrophes, and Unicode text.
- */
 function sanitizeFilePart(
 	value: string,
 ): string {
 	return value
-		.replace(/[\u0000-\u001f\u007f]/g, "")
-		.replace(/[\\/:*?"<>|]/g, " - ")
-		.replace(/\s+-\s+-\s+/g, " - ")
+		.replace(
+			/[\u0000-\u001f\u007f]/g,
+			"",
+		)
+		.replace(
+			/[\\/:*?"<>|]/g,
+			" - ",
+		)
+		.replace(
+			/\s+-\s+-\s+/g,
+			" - ",
+		)
 		.replace(/\s+/g, " ")
 		.replace(/[. ]+$/g, "")
 		.trim();
@@ -54,24 +59,29 @@ function truncateUnicode(
 	value: string,
 	maxLength: number,
 ): string {
-	const chars = Array.from(value);
+	const chars =
+		Array.from(value);
 
-	if (chars.length <= maxLength) {
+	if (
+		chars.length <=
+			maxLength
+	) {
 		return value;
 	}
 
 	return chars
-		.slice(0, maxLength)
+		.slice(
+			0,
+			maxLength,
+		)
 		.join("")
 		.trim()
-		.replace(/[. -]+$/g, "");
+		.replace(
+			/[. -]+$/g,
+			"",
+		);
 }
 
-/**
- * Strip retailer edition labels from book titles while keeping genuine
- * subtitles and series information intact. Only removes explicit trailing
- * markers such as "(Standard Edition)" or "[Kindle Edition]".
- */
 function stripTrailingEditionLabel(
 	value: string,
 ): string {
@@ -90,7 +100,11 @@ function stripTrailingEditionLabel(
 function canonicalTitle(
 	metadata: BookMetadata,
 ): string | undefined {
-	if (!isMeaningful(metadata.title)) {
+	if (
+		!isMeaningful(
+			metadata.title,
+		)
+	) {
 		return undefined;
 	}
 
@@ -110,13 +124,18 @@ function canonicalTitle(
 			),
 		);
 
-	return cleaned || undefined;
+	return cleaned ||
+		undefined;
 }
 
 function canonicalAuthor(
 	metadata: BookMetadata,
 ): string | undefined {
-	if (!isMeaningful(metadata.author)) {
+	if (
+		!isMeaningful(
+			metadata.author,
+		)
+	) {
 		return undefined;
 	}
 
@@ -125,7 +144,8 @@ function canonicalAuthor(
 			metadata.author!,
 		);
 
-	return cleaned || undefined;
+	return cleaned ||
+		undefined;
 }
 
 function fallbackBaseName(
@@ -133,7 +153,10 @@ function fallbackBaseName(
 ): string {
 	const withoutExtension =
 		originalFileName
-			.replace(/\.epub$/i, "")
+			.replace(
+				/\.epub$/i,
+				"",
+			)
 			.trim();
 
 	return (
@@ -144,10 +167,6 @@ function fallbackBaseName(
 	);
 }
 
-/**
- * Build a canonical EPUB filename from metadata and original filename.
- * Enforces conservative limits for cross-device compatibility (Kindle, X4).
- */
 export function buildCanonicalEpubFileName(
 	metadata: BookMetadata,
 	originalFileName: string,
@@ -157,25 +176,30 @@ export function buildCanonicalEpubFileName(
 	syncAuthor?: string;
 } {
 	const title =
-		canonicalTitle(metadata) ??
+		canonicalTitle(
+			metadata,
+		) ??
 		fallbackBaseName(
 			originalFileName,
 		);
 
 	const author =
-		canonicalAuthor(metadata);
+		canonicalAuthor(
+			metadata,
+		);
 
 	const authorSuffix =
 		author
 			? ` - ${author}`
 			: "";
 
-	/* Keep filename length conservative and consistent across devices. */
 	const maxTitleLength =
 		Math.max(
 			30,
 			MAX_CANONICAL_BASENAME_LENGTH -
-				Array.from(authorSuffix).length,
+				Array.from(
+					authorSuffix,
+				).length,
 		);
 
 	const syncTitle =
@@ -196,19 +220,21 @@ export function buildCanonicalEpubFileName(
 	};
 }
 
-/**
- * Fallback filename generator for cases where metadata repair has not occurred.
- * Used as a metadata search hint before determining real title/author.
- */
 export function safeFileName(
 	fileName: string,
 ): string {
-	/* Use light-touch sanitization to preserve punctuation for search hints. */
-	const clean = fileName
-		.replace(/[\\/\0]/g, "_")
-		.replace(/[\u0001-\u001f\u007f]/g, "")
-		.replace(/\s+/g, " ")
-		.trim();
+	const clean =
+		fileName
+			.replace(
+				/[\\/\0]/g,
+				"_",
+			)
+			.replace(
+				/[\u0001-\u001f\u007f]/g,
+				"",
+			)
+			.replace(/\s+/g, " ")
+			.trim();
 
 	const base =
 		clean ||
@@ -224,18 +250,25 @@ export function safeFileName(
 function formatSourceList(
 	resolved: ResolvedMetadata,
 ): string | undefined {
-	const bestBySource = new Map<
-		MetadataSource,
-		number
-	>();
+	const bestBySource =
+		new Map<
+			MetadataSource,
+			number
+		>();
 
-	for (const match of resolved.matches) {
+	for (
+		const match
+		of resolved.matches
+	) {
 		const previous =
 			bestBySource.get(
 				match.source,
 			) ?? 0;
 
-		if (match.score > previous) {
+		if (
+			match.score >
+				previous
+		) {
 			bestBySource.set(
 				match.source,
 				match.score,
@@ -243,65 +276,52 @@ function formatSourceList(
 		}
 	}
 
-	const order: MetadataSource[] = [
-		"lectulandia",
-		"google-books",
-		"open-library",
-	];
+	const order:
+		MetadataSource[] = [
+			"goodreads",
+			"lectulandia",
+			"google-books",
+			"open-library",
+		];
 
-	const values = order
-		.filter((source) =>
-			bestBySource.has(source),
-		)
-		.map(
-			(source) =>
-				`${source} (${bestBySource.get(source)}%)`,
-		);
+	const values =
+		order
+			.filter(
+				(source) =>
+					bestBySource.has(
+						source,
+					),
+			)
+			.map(
+				(source) =>
+					`${source} (${bestBySource.get(source)}%)`,
+			);
 
 	return values.length
 		? values.join(", ")
 		: undefined;
 }
 
-function formatDateAndPages(
-	metadata: BookMetadata,
-): string | undefined {
-	const parts: string[] = [];
-
-	if (metadata.published) {
-		parts.push(metadata.published);
-	}
-
-	if (metadata.pageCount) {
-		parts.push(
-			`${metadata.pageCount} páginas`,
-		);
-	}
-
-	return parts.length
-		? parts.join(" · ")
-		: undefined;
-}
-
 function formatTelegramMessage(
-	key: string,
-	xteinkKey: string,
 	metadata: BookMetadata,
 	resolved: ResolvedMetadata,
 	optimization: {
 		originalSize: number;
 		optimizedSize: number;
 		optimizedImages: number;
-		skippedImages: number;
+		totalImages: number;
 		svgFixes: number;
 	},
 ): string {
-	const lines: string[] = [
-		"📚 EPUB preparado",
-		"",
-		metadata.title ?? "Título desconocido",
-		metadata.author ?? "Autor desconocido",
-	];
+	const lines:
+		string[] = [
+			"📚 EPUB preparado",
+			"",
+			metadata.title ??
+				"Título desconocido",
+			metadata.author ??
+				"Autor desconocido",
+		];
 
 	if (metadata.series) {
 		lines.push(
@@ -314,96 +334,80 @@ function formatTelegramMessage(
 		);
 	}
 
-	const dateAndPages =
-		formatDateAndPages(metadata);
-
-	if (dateAndPages) {
+	if (metadata.published) {
 		lines.push(
-			`📅 ${dateAndPages}`,
+			`📅 ${metadata.published}`,
 		);
 	}
 
-	if (metadata.subjects?.length) {
-		lines.push(
-			`🏷️ ${metadata.subjects.join(" · ")}`,
-		);
-	}
+	const displayedSubjects =
+		metadata.subjects
+			?.slice(
+				0,
+				12,
+			);
 
-	if (metadata.isbn) {
+	if (
+		displayedSubjects
+			?.length
+	) {
 		lines.push(
-			`ISBN: ${metadata.isbn}`,
-		);
-	}
-
-	if (metadata.publisher) {
-		lines.push(
-			`Editorial: ${metadata.publisher}`,
-		);
-	}
-
-	if (resolved.repairedFields.length) {
-		lines.push(
-			"",
-			`🔧 Actualizado: ${resolved.repairedFields.join(", ")}`,
+			`🏷️ ${displayedSubjects.join(" · ")}`,
 		);
 	}
 
 	const sources =
-		formatSourceList(resolved);
+		formatSourceList(
+			resolved,
+		);
 
 	if (sources) {
 		lines.push(
+			"",
 			`🔎 Fuentes: ${sources}`,
 		);
 	}
 
-	const warnings = [
-		...resolved.warnings,
-	];
-
-	const hasGoogle =
-		resolved.matches.some(
-			(match) =>
-				match.source ===
-				"google-books",
-		);
-
-	if (!hasGoogle) {
-		warnings.push(
-			"Google Books returned no confident match",
-		);
-	}
-
-	if (warnings.length) {
-		lines.push("");
-
-		for (const warning of [
-			...new Set(warnings),
-		]) {
-			lines.push(`⚠️ ${warning}`);
-		}
-	}
-
-	const sizeMb = (value: number) =>
-		`${(value / (1024 * 1024)).toFixed(2)} MB`;
+	const sizeMb =
+		(value: number) =>
+			`${(
+				value /
+				(1024 * 1024)
+			).toFixed(2)} MB`;
 
 	lines.push(
 		"",
-		`☁️ Kindle: ${key}`,
-		`⚙️ X4: ${xteinkKey}`,
 		`🖼️ X4: ${optimization.optimizedImages} imágenes optimizadas` +
-			(optimization.skippedImages
-				? ` · ${optimization.skippedImages} conservadas`
-				: "") +
-			(optimization.svgFixes
-				? ` · ${optimization.svgFixes} SVG corregidos`
-				: ""),
+			(
+				optimization.svgFixes
+					? ` · ${optimization.svgFixes} SVG corregidos`
+					: ""
+			),
 		`📦 X4: ${sizeMb(optimization.originalSize)} → ${sizeMb(optimization.optimizedSize)}`,
 		"",
 		"✅ Listo para sincronizar.",
 	);
 
-	return lines.join("\n");
+	const message =
+		lines.join("\n");
+
+	/*
+	 * Telegram accepts up to 4096 characters for message text.
+	 * Subjects are already capped, but retain a final safety net.
+	 */
+	if (
+		message.length <=
+			4000
+	) {
+		return message;
+	}
+
+	return (
+		`${message.slice(
+			0,
+			3940,
+		)}\n\n✅ Listo para sincronizar.`
+	);
 }
 
 function metadataSourcesForR2(
@@ -424,29 +428,26 @@ export async function prepareAndStoreEpub(
 	originalBytes: Uint8Array,
 	originalFileName: string,
 ): Promise<StoredEpubResult> {
-	/*
-	 * The original filename is used only as a metadata hint.
-	 * We do NOT decide the final R2/Kindle/X4 filename until repairEpub()
-	 * has finished and we know the best title/author available.
-	 */
 	const inputFileName =
 		safeFileName(
 			originalFileName,
 		);
 
-	const repaired = await repairEpub(
-		originalBytes,
-		inputFileName,
-		{
-			googleBooksApiKey:
-				env.GOOGLE_BOOKS_API_KEY,
-			lectulandiaBaseUrl:
-				env.LECTULANDIA_BASE_URL,
-		},
-	);
+	const repaired =
+		await repairEpub(
+			originalBytes,
+			inputFileName,
+			{
+				googleBooksApiKey:
+					env.GOOGLE_BOOKS_API_KEY,
+				lectulandiaBaseUrl:
+					env.LECTULANDIA_BASE_URL,
+			},
+		);
 
 	const metadata =
-		repaired.resolved.metadata;
+		repaired.resolved
+			.metadata;
 
 	const canonical =
 		buildCanonicalEpubFileName(
@@ -463,77 +464,117 @@ export async function prepareAndStoreEpub(
 	const xteinkKey =
 		`books_xteink/${fileName}`;
 
+	/*
+	 * EPUBKit handles the X4 image/structure pass externally.
+	 * The repaired EPUB stays untouched for Kindle.
+	 */
 	const xteinkOptimization =
-		await optimizeEpubForXteink(
-			env,
+		await optimizeEpubWithEpubKit(
 			repaired.bytes,
+			fileName,
 		);
 
-	const customMetadata: Record<
-		string,
-		string
-	> = {
-		metadataRepaired:
-			repaired.resolved.repairedFields.length
-				? "true"
-				: "false",
-		metadataSources:
-			metadataSourcesForR2(
-				repaired.resolved,
-			),
+	const customMetadata:
+		Record<
+			string,
+			string
+		> = {
+			metadataRepaired:
+				repaired.resolved
+					.repairedFields
+					.length
+					? "true"
+					: "false",
 
-		/*
-		 * OPDS uses these two fields so CrossInk's "Title - Author"
-		 * filename option produces the same basename as the Kindle plugin.
-		 */
-		syncTitle:
-			canonical.syncTitle,
-		originalFileName:
-			originalFileName.slice(0, 500),
-	};
+			metadataSources:
+				metadataSourcesForR2(
+					repaired.resolved,
+				),
 
-	if (canonical.syncAuthor) {
+			syncTitle:
+				canonical.syncTitle,
+
+			originalFileName:
+				originalFileName.slice(
+					0,
+					500,
+				),
+		};
+
+	if (
+		canonical.syncAuthor
+	) {
 		customMetadata.syncAuthor =
 			canonical.syncAuthor;
 	}
 
-	const compactFields: Array<
-		[keyof BookMetadata, string]
-	> = [
-		["title", "title"],
-		["author", "author"],
-		["language", "language"],
-		["isbn", "isbn"],
-		["publisher", "publisher"],
-		["published", "published"],
-		["series", "series"],
-		["seriesIndex", "seriesIndex"],
-	];
+	const compactFields:
+		Array<
+			[
+				keyof BookMetadata,
+				string,
+			]
+		> = [
+			["title", "title"],
+			["author", "author"],
+			["language", "language"],
+			["isbn", "isbn"],
+			["publisher", "publisher"],
+			["published", "published"],
+			["series", "series"],
+			[
+				"seriesIndex",
+				"seriesIndex",
+			],
+		];
 
-	for (const [field, name] of compactFields) {
-		const value = metadata[field];
+	for (
+		const [
+			field,
+			name,
+		]
+		of compactFields
+	) {
+		const value =
+			metadata[field];
+
 		if (
-			typeof value === "string" &&
+			typeof value ===
+				"string" &&
 			value
 		) {
 			customMetadata[name] =
-				value.slice(0, 500);
+				value.slice(
+					0,
+					500,
+				);
 		}
 	}
 
-	if (metadata.pageCount) {
+	if (
+		metadata.pageCount
+	) {
 		customMetadata.pageCount =
-			String(metadata.pageCount);
+			String(
+				metadata.pageCount,
+			);
 	}
 
-	if (metadata.description) {
-		customMetadata.descriptionPreview =
-			metadata.description.slice(0, 300);
+	if (
+		metadata.description
+	) {
+		customMetadata
+			.descriptionPreview =
+			metadata.description.slice(
+				0,
+				300,
+			);
 	}
 
 	const commonHttpMetadata = {
 		contentType:
 			"application/epub+zip",
+
 		contentDisposition:
 			`attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
 	};
@@ -545,6 +586,7 @@ export async function prepareAndStoreEpub(
 			{
 				httpMetadata:
 					commonHttpMetadata,
+
 				customMetadata: {
 					...customMetadata,
 					variant:
@@ -552,31 +594,42 @@ export async function prepareAndStoreEpub(
 				},
 			},
 		),
+
 		env.EREADER_BUCKET.put(
 			xteinkKey,
 			xteinkOptimization.bytes,
 			{
 				httpMetadata:
 					commonHttpMetadata,
+
 				customMetadata: {
 					...customMetadata,
+
 					variant:
-						"xteink-optimized",
+						"xteink-epubkit",
+
 					optimizedImages:
 						String(
-							xteinkOptimization.optimizedImages,
+							xteinkOptimization
+								.optimizedImages,
 						),
-					skippedImages:
+
+					totalImages:
 						String(
-							xteinkOptimization.skippedImages,
+							xteinkOptimization
+								.totalImages,
 						),
+
 					svgFixes:
 						String(
-							xteinkOptimization.svgFixes,
+							xteinkOptimization
+								.svgFixes,
 						),
+
 					sourceSize:
 						String(
-							xteinkOptimization.originalSize,
+							xteinkOptimization
+								.originalSize,
 						),
 				},
 			},
@@ -587,17 +640,23 @@ export async function prepareAndStoreEpub(
 		key,
 		xteinkKey,
 		fileName,
-		size: repaired.bytes.byteLength,
+		size:
+			repaired.bytes
+				.byteLength,
+
 		xteinkSize:
-			xteinkOptimization.optimizedSize,
+			xteinkOptimization
+				.optimizedSize,
+
 		metadata,
-		resolved: repaired.resolved,
-		message: formatTelegramMessage(
-			key,
-			xteinkKey,
-			metadata,
+		resolved:
 			repaired.resolved,
-			xteinkOptimization,
-		),
+
+		message:
+			formatTelegramMessage(
+				metadata,
+				repaired.resolved,
+				xteinkOptimization,
+			),
 	};
 }

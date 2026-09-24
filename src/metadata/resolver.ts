@@ -2232,10 +2232,26 @@ export async function resolveMetadata(
 		| MetadataCandidate
 		| undefined;
 
+	const bestLectulandia =
+		lectulandiaCandidates
+			.slice()
+			.sort(
+				(a, b) =>
+					b.score -
+					a.score,
+			)[0];
+
 	if (
-		sources.description !==
-			"lectulandia" ||
-		!result.series
+		(
+			!bestLectulandia ||
+			bestLectulandia.score <
+				90
+		) &&
+		(
+			sources.description !==
+				"lectulandia" ||
+			!result.series
+		)
 	) {
 		finalLectulandia =
 			await lookupFinalLectulandia(

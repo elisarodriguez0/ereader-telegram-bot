@@ -23,6 +23,10 @@ const REQUEST_HEADERS = {
 		"Mozilla/5.0 (compatible; EreaderSync/0.6; personal-library)",
 };
 
+const MAX_CANDIDATE_URLS = 2;
+const CANDIDATE_BATCH_SIZE = 1;
+const STRONG_MATCH_SCORE = 90;
+
 interface ParsedLectulandiaBook {
 	url: string;
 	title?: string;
@@ -375,11 +379,6 @@ function extractSubjects(
 function extractDescription(
 	html: string,
 ): string | undefined {
-	/*
-	 * STRICT:
-	 * The description comes ONLY from
-	 * <div id="sinopsis">.
-	 */
 	const block =
 		extractBlock(
 			html,
@@ -470,11 +469,6 @@ async function discoverCandidateUrls(
 	const hints =
 		hypothesis.hints;
 
-	/*
-	 * Exact/direct title lookup.
-	 * This makes title-only filenames useful
-	 * even when there is no author.
-	 */
 	if (hints.title) {
 		const slug =
 			slugify(
@@ -506,11 +500,20 @@ async function discoverCandidateUrls(
 				)
 			) {
 				urls.add(url);
+
+				if (
+					urls.size >=
+					MAX_CANDIDATE_URLS
+				) {
+					break;
+				}
 			}
 		}
 	}
 
 	if (
+		urls.size <
+			MAX_CANDIDATE_URLS &&
 		hints.series &&
 		hints.seriesIndex
 	) {
@@ -531,11 +534,21 @@ async function discoverCandidateUrls(
 				)
 			) {
 				urls.add(url);
+
+				if (
+					urls.size >=
+					MAX_CANDIDATE_URLS
+				) {
+					break;
+				}
 			}
 		}
 	}
 
-	return [...urls];
+	return [...urls].slice(
+		0,
+		MAX_CANDIDATE_URLS,
+	);
 }
 
 function scoreCandidate(
@@ -566,11 +579,6 @@ function scoreCandidate(
 			);
 	}
 
-	/*
-	 * Hypothesis confidence is a small
-	 * modifier, not a replacement for the
-	 * actual provider match.
-	 */
 	score *=
 		0.88 +
 		0.12 *
@@ -640,29 +648,22 @@ export async function lookupLectulandia(
 				number;
 		}> = [];
 
-	/*
-	 * Avoid an unbounded crawl of an
-	 * author's catalogue.
-	 */
 	const urls =
 		candidateUrls.slice(
 			0,
-			30,
+			MAX_CANDIDATE_URLS,
 		);
-
-	const batchSize =
-		4;
 
 	for (
 		let offset = 0;
 		offset < urls.length;
-		offset += batchSize
+		offset += CANDIDATE_BATCH_SIZE
 	) {
 		const batch =
 			urls.slice(
 				offset,
 				offset +
-					batchSize,
+					CANDIDATE_BATCH_SIZE,
 			);
 
 		const parsed =
@@ -707,6 +708,23 @@ export async function lookupLectulandia(
 				);
 			}
 		}
+
+		const strongMatch =
+			candidates
+				.slice()
+				.sort(
+					(a, b) =>
+						b.score -
+						a.score,
+				)[0];
+
+		if (
+			strongMatch &&
+			strongMatch.score >=
+				STRONG_MATCH_SCORE
+		) {
+			break;
+		}
 	}
 
 	candidates.sort(
@@ -722,9 +740,6 @@ export async function lookupLectulandia(
 		return undefined;
 	}
 
-	/*
-	 * Additional hard guards.
-	 */
 	if (
 		hypothesis.kind ===
 			"series"

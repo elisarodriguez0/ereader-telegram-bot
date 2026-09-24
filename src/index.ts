@@ -19,6 +19,7 @@ import {
 	downloadTelegramFile,
 	isAllowedTelegramUser,
 	sendTelegramMessage,
+	editTelegramMessageText,
 } from "./telegram";
 
 import type {
@@ -26,6 +27,10 @@ import type {
 	TelegramMessage,
 	TelegramUpdate,
 } from "./telegram";
+
+import type {
+	EpubQueueJob,
+} from "./jobs";
 
 import {
 	prepareKindleWallpaper,
@@ -83,34 +88,23 @@ async function handleEpubMessage(
 		document.file_name ??
 		"book.epub";
 
-	await sendTelegramMessage(
-		env,
-		message.chat.id,
-		`☁️ Preparando ${fileName}...`,
-	);
-
-	try {
-		const downloaded =
-			await downloadTelegramFile(
-				env,
-				document.file_id,
-				document.file_size,
-			);
-		const stored =
-			await prepareAndStoreEpub(
-				env,
-				downloaded.bytes,
-				fileName,
-			);
-
+	const statusMessage =
 		await sendTelegramMessage(
 			env,
 			message.chat.id,
-			stored.message,
+			`☁️ v.3 Preparando ${fileName}...`,
 		);
+
+	try {
+		await env.EPUB_QUEUE.send({
+			chatId: message.chat.id,
+			statusMessageId:
+				statusMessage.message_id,
+			document,
+		});
 	} catch (error) {
 		console.error(
-			"[EPUB] upload failed",
+			"[EPUB] queueing failed",
 			error,
 		);
 
@@ -119,10 +113,67 @@ async function handleEpubMessage(
 				? error.message
 				: String(error);
 
-		await sendTelegramMessage(
+		await editTelegramMessageText(
 			env,
 			message.chat.id,
-			`❌ No pude preparar el EPUB.\n\n${detail}`,
+			statusMessage.message_id,
+			`❌ No pude poner el EPUB en cola.\n\n${detail}`,
+		);
+	}
+}
+
+async function processEpubQueueJob(
+	env: Env,
+	job: EpubQueueJob,
+): Promise<string> {
+	const fileName =
+		job.document.file_name ??
+		"book.epub";
+
+	const downloaded =
+		await downloadTelegramFile(
+			env,
+			job.document.file_id,
+			job.document.file_size,
+		);
+
+	const stored =
+		await prepareAndStoreEpub(
+			env,
+			downloaded.bytes,
+			fileName,
+		);
+
+	return stored.message;
+}
+
+async function notifyEpubResult(
+	env: Env,
+	job: EpubQueueJob,
+	text: string,
+): Promise<void> {
+	const safeText =
+		text.length > 4000
+			? `${text.slice(0, 3950)}\n\n✅ Listo para sincronizar.`
+			: text;
+
+	try {
+		await editTelegramMessageText(
+			env,
+			job.chatId,
+			job.statusMessageId,
+			safeText,
+		);
+	} catch (error) {
+		console.error(
+			"[EPUB] edit status failed, sending new message",
+			error,
+		);
+
+		await sendTelegramMessage(
+			env,
+			job.chatId,
+			safeText,
 		);
 	}
 }
@@ -495,4 +546,70 @@ async function fetchHandler(
 
 export default {
 	fetch: fetchHandler,
+
+	async queue(
+		batch: MessageBatch<EpubQueueJob>,
+		env: Env,
+	): Promise<void> {
+		for (const message of batch.messages) {
+			try {
+				const finalMessage =
+					await processEpubQueueJob(
+						env,
+						message.body,
+					);
+
+				await notifyEpubResult(
+					env,
+					message.body,
+					finalMessage,
+				);
+
+				message.ack();
+			} catch (error) {
+				console.error(
+					"[EPUB] queued processing failed",
+					error,
+				);
+
+				const detail =
+					error instanceof Error
+						? error.message
+						: String(error);
+
+				if (message.attempts < 3) {
+					try {
+						await notifyEpubResult(
+							env,
+							message.body,
+							`☁️ El EPUB dio un error temporal. Reintentando (${message.attempts}/3)...`,
+						);
+					} catch (notifyError) {
+						console.error(
+							"[EPUB] retry notification failed",
+							notifyError,
+						);
+					}
+
+					message.retry({
+						delaySeconds:
+							10 *
+							message.attempts,
+					});
+
+					continue;
+				}
+
+				try {
+					await notifyEpubResult(
+						env,
+						message.body,
+						`❌ No pude preparar el EPUB después de 3 intentos.\n\n${detail}`,
+					);
+				} finally {
+					message.ack();
+				}
+			}
+		}
+	},
 };

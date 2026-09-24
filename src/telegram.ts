@@ -131,8 +131,8 @@ export async function sendTelegramMessage(
 	chatId: number,
 	text: string,
 	extra: Record<string, unknown> = {},
-): Promise<void> {
-	await telegramApi(
+): Promise<TelegramMessage> {
+	return await telegramApi<TelegramMessage>(
 		env,
 		"sendMessage",
 		{
@@ -141,6 +141,24 @@ export async function sendTelegramMessage(
 			disable_web_page_preview:
 				true,
 			...extra,
+		},
+	);
+}
+
+export async function editTelegramMessageText(
+	env: Env,
+	chatId: number,
+	messageId: number,
+	text: string,
+): Promise<void> {
+	await telegramApi<TelegramMessage>(
+		env,
+		"editMessageText",
+		{
+			chat_id: chatId,
+			message_id: messageId,
+			text,
+			disable_web_page_preview: true,
 		},
 	);
 }
