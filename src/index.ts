@@ -92,7 +92,7 @@ async function handleEpubMessage(
 		await sendTelegramMessage(
 			env,
 			message.chat.id,
-			`☁️ v.3 Preparando ${fileName}...`,
+			`☁️ Preparando ${fileName}...`,
 		);
 
 	try {
