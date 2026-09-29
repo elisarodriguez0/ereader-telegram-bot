@@ -88,11 +88,6 @@ export function cleanText(
 	return clean || undefined;
 }
 
-/**
- * Remove retailer edition labels and language/format suffixes from titles,
- * preserving genuine subtitles and series information. Targets only explicit
- * trailing markers: (Edition), [Kindle Edition], or - Edition variants.
- */
 export function stripEditionNoise(
 	value?: string,
 ): string | undefined {
@@ -104,7 +99,6 @@ export function stripEditionNoise(
 
 	let clean: string = initial;
 
-	/* Handle stacked edition suffixes from retailer metadata. */
 	for (let pass = 0; pass < 3; pass++) {
 		const previous: string = clean;
 
@@ -139,10 +133,6 @@ export function stripEditionNoise(
 	return cleanText(clean);
 }
 
-/**
- * Normalize text to NFD form, remove diacritics, lowercase, and collapse
- * whitespace. Used for fuzzy matching and deduplication.
- */
 export function normalizeText(
 	value?: string,
 ): string {
@@ -155,10 +145,6 @@ export function normalizeText(
 		.replace(/\s+/g, " ");
 }
 
-/**
- * Validate that a string is meaningful (non-empty, not in blacklist,
- * contains actual content after normalization).
- */
 export function isMeaningful(
 	value?: string,
 ): boolean {
@@ -474,23 +460,36 @@ export function parseStructuredSeriesTitle(
 	}
 
 	/*
-	 * This parser is deliberately stricter
-	 * than filename parsing. It is for titles
-	 * returned by catalog providers that embed
-	 * series information in a display title.
+	 * Common retailer/catalogue form where the visible title comes first
+	 * and the trailing parentheses contain only series + volume:
 	 *
-	 * Accepted examples:
-	 *   Rose Hill 01 - Wild Love
-	 *   Rose Hill #1 - Wild Love
-	 *   Rose Hill Book 1: Wild Love
-	 *   Rose Hill Vol. 1 — Wild Love
+	 *   A oscuras (Adéntrate en la oscuridad 1)
+	 *   A oscuras (Adéntrate en la oscuridad #1)
+	 *   A oscuras (Adéntrate en la oscuridad, 1)
+	 *   A oscuras (Adéntrate en la oscuridad 1 de 3)
 	 *
-	 * NOT accepted:
-	 *   Area 51
-	 *   Catch-22
-	 *   1984
-	 *   Area 51 - Annie Jacobsen
+	 * Requiring a numeric final position inside parentheses keeps normal
+	 * subtitles such as "Título (Edición especial)" untouched.
 	 */
+	const parenthetical = clean.match(
+		/^(.*?)\s*\(\s*(.+?)\s*(?:,\s*|#\s*|\s+)(\d+(?:[.,]\d+)?)(?:\s+de\s+\d+)?\s*\)$/,
+	);
+
+	if (parenthetical) {
+		const title = cleanText(parenthetical[1]);
+		const series = cleanText(parenthetical[2]);
+		const seriesIndex = normalizeSeriesIndex(parenthetical[3]);
+
+		if (
+			title &&
+			series &&
+			seriesIndex &&
+			seriesIndex !== "0"
+		) {
+			return { title, series, seriesIndex };
+		}
+	}
+
 	const explicitPatterns = [
 		/^(.*?)\s+(?:book|libro|vol(?:ume|umen)?|tomo)\.?\s*(?:n(?:[º°o]\.?)?\s*)?#?\s*(\d+(?:[.,]\d+)?)\s*(?:-|–|—|:)\s*(.+)$/i,
 		/^(.*?)\s+#\s*(\d+(?:[.,]\d+)?)\s*(?:-|–|—|:)\s*(.+)$/i,
@@ -529,15 +528,6 @@ export function parseStructuredSeriesTitle(
 		}
 	}
 
-	/*
-	 * A zero-padded ordinal immediately before
-	 * a separator is a common catalogue format:
-	 *
-	 *   Rose Hill 01 - Wild Love
-	 *
-	 * Requiring the leading zero is intentional.
-	 * Plain "Area 51 - ..." does not match.
-	 */
 	const padded =
 		clean.match(
 			/^(.*?)\s+(0\d{1,2})\s*(?:-|–|—|:)\s*(.+)$/,
@@ -616,12 +606,6 @@ export function isPlausiblePublicationDate(
 	const clean =
 		value.trim();
 
-	/*
-	 * Full timestamps in EPUB metadata are often
-	 * converter/import timestamps, not publication
-	 * dates. We only accept YYYY, YYYY-MM or
-	 * YYYY-MM-DD.
-	 */
 	if (/T\d{2}:\d{2}/i.test(clean)) {
 		return false;
 	}
@@ -642,11 +626,6 @@ export function isPlausiblePublicationDate(
 		new Date()
 			.getUTCFullYear() + 2;
 
-	/*
-	 * This is edition metadata for an EPUB, not a
-	 * historical-work dating system. Years such as
-	 * 0101 are almost certainly sentinel/corrupt data.
-	 */
 	if (
 		year < 1000 ||
 		year > maxYear
@@ -726,11 +705,6 @@ export function scoreTitleMatch(
 			score -= 25;
 		}
 	} else {
-		/*
-		 * With no author to corroborate,
-		 * title similarity carries almost
-		 * the whole score.
-		 */
 		score =
 			titleScore * 95;
 	}
