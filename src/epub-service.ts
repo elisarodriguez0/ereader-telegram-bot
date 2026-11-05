@@ -762,11 +762,29 @@ export async function prepareAndStoreEpub(
 	const updatedExisting =
 		!!existing;
 
-	const xteinkOptimization =
-		await optimizeEpubWithEpubKit(
-			repaired.bytes,
-			fileName,
-		);
+let xteinkOptimization;
+
+try {
+    xteinkOptimization =
+        await optimizeEpubWithEpubKit(
+            repaired.bytes,
+            fileName,
+        );
+} catch (error) {
+    console.error(
+        "[EPUBKit] Optimization unavailable:",
+        error,
+    );
+
+    xteinkOptimization = {
+        bytes: repaired.bytes,
+        originalSize: repaired.bytes.byteLength,
+        optimizedSize: repaired.bytes.byteLength,
+        optimizedImages: 0,
+        totalImages: 0,
+        svgFixes: 0,
+    };
+}
 
 	const customMetadata:
 		Record<
